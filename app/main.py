@@ -15,7 +15,7 @@ from app.hub import Hub
 from app.llm import LLM
 from app.view import snapshot
 
-app = FastAPI(title="SimCheck")
+app = FastAPI(title="Loom")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 

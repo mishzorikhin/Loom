@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Читалка журнала SimCheck для агента. Только стандартная библиотека.
+"""Читалка журнала Loom для агента. Только стандартная библиотека.
 
   simlog.py digest                    сводка: всё ли в порядке и что не так (начинать с неё)
   simlog.py tail [-n 50] [--level warn] [--ev visit,llm] [--since 10m] [--visit 65] [-q текст] [--json]
@@ -8,7 +8,7 @@
   simlog.py call 183                  вызов модели целиком (промпты, сырой ответ)
   simlog.py follow [--level info]     смотреть новые события, Ctrl+C — выход
 
-Адрес: SIMCHECK_URL (http://192.168.0.16:8421). Входа на странице нет, скрипт ходит обычными запросами.
+Адрес: LOOM_URL (http://192.168.0.16:8421). Входа на странице нет, скрипт ходит обычными запросами.
 """
 
 import argparse
@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-URL = os.environ.get("SIMCHECK_URL", "http://192.168.0.16:8421").rstrip("/")
+URL = (os.environ.get("LOOM_URL") or os.environ.get("SIMCHECK_URL") or "http://192.168.0.16:8421").rstrip("/")
 OPENER = urllib.request.build_opener()
 
 

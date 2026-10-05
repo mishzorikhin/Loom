@@ -1,4 +1,4 @@
-# SimCheck
+# Loom
 
 Наблюдаемая симуляция заведения. Сейчас работает одна кофейня. Гостиница, ресторан и магазин автозапчастей — замысел с тем же каркасом, в коде их нет.
 
@@ -7,6 +7,7 @@
 ## Где это крутится
 
 - Страница: `http://192.168.0.16:8421`
+- Проект называется Loom. Имена `simcheck` в контейнере, образе, томе `simcheck-data`, каталоге `/opt/simcheck` и файле журнала `simcheck.log` оставлены прежними: переименование тома потеряло бы базу
 - Контейнер `simcheck`, перезапуск `unless-stopped`, порт `8421:8421`
 - На сервере исходники: `/opt/simcheck`, база в томе `simcheck-data` → `/data/sim.db`
 - Эта машина — `192.168.0.13`. Сервер и модель — `192.168.0.16`
@@ -28,7 +29,7 @@
 - `python3 scripts/simlog.py digest` — вердикт `ok` или `attention`, список «что не так», состояние прогона, задержки модели по ролям, итог дня, последние проблемы и события. Начинай с неё.
 - `python3 scripts/simlog.py tail -n 80 --level warn --ev visit,llm --since 30m --visit 65 -q текст` — события по фильтрам. `errors` — то же, что `--level warn`. `--json` отдаёт сырые строки.
 - `python3 scripts/simlog.py visit 65` — события визита и его разговор. `call 183` — вызов модели целиком (промпты, сырой ответ). `follow` — следить за новыми событиями.
-- Скрипт ходит на `SIMCHECK_URL` (по умолчанию `http://192.168.0.16:8421`) обычными запросами: входа на странице нет. Без скрипта: `GET /api/digest`, `GET /api/log`.
+- Скрипт ходит на `LOOM_URL` (прежнее имя `SIMCHECK_URL` тоже работает; по умолчанию `http://192.168.0.16:8421`) обычными запросами: входа на странице нет. Без скрипта: `GET /api/digest`, `GET /api/log`.
 
 Ключи строки: `t`, `lvl` (`debug`, `info`, `warn`, `error`), `ev`, дальше поля; у событий прогона есть `day` и `clock` (часы симуляции). События: `app.start`, `ws.connect|disconnect`, `run.kick|pause|speed|reset|recover|autopause`, `day.open|close`, `arrival.plan|none` (поток гостей), `visit.arrive|start|end|left|fail|verdict`, `queue.stay|fail`, `verdict.fallback|fail|echo`, `critic.review|fail`, `event.new|calm|slow|end|fail`, `district.new|fail`, `demographer.new|fail`, `cassette.drift`, `llm.start|call`, `manager.start|end|fail`, `dialog.fallback`, `mood.staff`, `verdict.echo`, `llm.health`, `api.control`, `settings.save`, `auth.fail`, `http.error|status|slow`, `engine.crash`, `client.error|rejection|fetch|slow` (ошибки страницы, её консоль агенту не видна, страница шлёт их сама). Промпты и сырые ответы модели в журнал не пишутся, они в таблице `llm_calls` (`call ID`). Новое событие добавляй через `log.event` или `Engine._ev` и вноси в этот список.
 

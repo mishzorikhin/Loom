@@ -1443,7 +1443,7 @@ let showNotes = false;
 
 function noteSeen() {
   try {
-    return Number(localStorage.getItem("simcheck-note-seen") || 0);
+    return Number(localStorage.getItem("loom-note-seen") || 0);
   } catch (err) {
     return 0;
   }
@@ -1451,7 +1451,7 @@ function noteSeen() {
 
 function markNotesSeen() {
   try {
-    if (snap.weeks.length) localStorage.setItem("simcheck-note-seen", String(snap.weeks[0].id));
+    if (snap.weeks.length) localStorage.setItem("loom-note-seen", String(snap.weeks[0].id));
   } catch (err) { /* без хранилища точка «новая» просто не запоминается */ }
 }
 
@@ -1723,7 +1723,7 @@ const sfx = (() => {
   let ctx = null;
   let on = false;
   try {
-    on = localStorage.getItem("simcheck-sound") === "1";
+    on = localStorage.getItem("loom-sound") === "1";
   } catch (err) {
     on = false;
   }
@@ -1752,7 +1752,7 @@ const sfx = (() => {
     set(value) {
       on = value;
       try {
-        localStorage.setItem("simcheck-sound", value ? "1" : "0");
+        localStorage.setItem("loom-sound", value ? "1" : "0");
       } catch (err) { /* без хранилища звук просто не запоминается */ }
       if (value) this.play("bell");
     },

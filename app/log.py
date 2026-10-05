@@ -22,7 +22,7 @@ MAX_TEXT = 300
 MAX_BYTES = 5_000_000
 KEEP_FILES = 3
 
-_logger = logging.getLogger("simcheck.journal")
+_logger = logging.getLogger("loom.journal")
 _logger.propagate = False
 _path: Path = LOG_PATH
 
