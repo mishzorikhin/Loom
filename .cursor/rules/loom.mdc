@@ -1,0 +1,8 @@
+---
+description: Правила проекта Loom
+alwaysApply: true
+---
+
+Правила проекта лежат в `AGENTS.md`: прочитай его целиком перед работой. Язык ответов и документов — русский.
+Документы: `docs/model.md` (мир), `docs/mvp.md` (что собрано, экран, контракты).
+Тесты: `PYTHONPATH=. python3 -m unittest discover -s tests`.
