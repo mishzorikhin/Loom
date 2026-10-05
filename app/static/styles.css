@@ -132,6 +132,17 @@ h1 {
   bottom: -1px;
   height: 3px;
   background: var(--line);
+  --open-from: 33.33%;
+  --open-to: 83.33%;
+}
+.dayprog::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--open-from);
+  right: calc(100% - var(--open-to));
+  background: #5b4a3c;
 }
 .dayprog i {
   display: block;
@@ -196,36 +207,6 @@ h1 {
 .cmd.primary { background: var(--amber); border-color: var(--amber); color: var(--ink); }
 .cmd.primary svg, .cmd.primary small { color: #5a3a10; }
 .cmd.primary:not(:disabled):hover { background: #f6b958; }
-
-.speed p {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 6px;
-  font-size: 14px;
-  line-height: 20px;
-  font-weight: 700;
-}
-.speed p span { color: var(--muted); font-weight: 400; font-size: 12.5px; }
-.seg {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 3px;
-  padding: 3px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-}
-.seg button {
-  min-height: 34px;
-  background: transparent;
-  border: 0;
-  border-radius: 7px;
-  color: var(--muted);
-  font-weight: 700;
-}
-.seg button:hover { color: var(--cream); }
-.seg button[aria-pressed="true"] { background: var(--amber); color: var(--ink); }
 
 /* меню на грифельной доске */
 .plaque {
@@ -609,7 +590,6 @@ pre {
   .cmds { grid-template-columns: 1fr 1fr; gap: 6px; }
   .cmd { min-height: 44px; gap: 8px; padding: 4px 8px; }
   .cmd small, .plaque, .foot { display: none; }
-  .speed p { display: none; }
   .drawer { left: 10px; right: 10px; width: auto; top: auto; height: 60%; }
   .leftstack { left: 10px; right: 10px; width: auto; }
   .speech { width: 180px; }
@@ -638,7 +618,7 @@ pre {
 /* ---------- лента дня, точки на шкале, итог дня ---------- */
 
 .hud { z-index: 5; }
-.dayprog { height: 4px; background-image: linear-gradient(90deg, #6a5646 1px, transparent 1px); background-size: calc(100% / 6) 100%; background-color: var(--line); }
+.dayprog { height: 4px; background-image: linear-gradient(90deg, #6a5646 1px, transparent 1px); background-size: calc(100% / 12) 100%; background-color: var(--line); }
 .dayline { position: absolute; inset: 0; }
 .dot-mark {
   position: absolute;
@@ -791,7 +771,7 @@ button.dot-mark:hover { transform: scale(1.4); }
   text-transform: uppercase;
   vertical-align: 2px;
 }
-.menu li span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu li span:first-child { min-width: 0; overflow-wrap: anywhere; line-height: 1.25; }
 .menu li span:last-child { flex: 0 0 auto; white-space: nowrap; }
 
 .bubble.think { background: transparent; border: 1px dashed #b39a72; font-style: italic; }
@@ -912,3 +892,121 @@ button.dot-mark:hover { transform: scale(1.4); }
 .drawer .slip { margin: 0; }
 .drawer .slip::before { left: 16px; }
 .drawer .slip + .slip { margin-top: 2px; }
+
+/* ---------- живой мир ---------- */
+.sway { transform-box: fill-box; transform-origin: 50% 100%; animation: sway 4.2s ease-in-out infinite alternate; }
+@keyframes sway { from { transform: rotate(-1.4deg); } to { transform: rotate(1.4deg); } }
+.puff { animation: puff 3.9s ease-out infinite; opacity: 0; }
+@keyframes puff {
+  0% { transform: translate(0, 0) scale(0.5); opacity: 0; }
+  15% { opacity: 0.55; }
+  100% { transform: translate(7px, -30px) scale(1.9); opacity: 0; }
+}
+.person:not(.walk):not(.sit) .upper { animation: breathe 3.2s ease-in-out infinite alternate; }
+@keyframes breathe { to { transform: translateY(-0.7px); } }
+#room.still .sway, #room.still .puff, #room.still .person * { animation-play-state: paused !important; }
+@media (prefers-reduced-motion: reduce) { .sway, .puff { animation: none; } }
+
+/* Игровой мир Phaser, окна и управление остаются поверх canvas. */
+#room { position: absolute; inset: 0; touch-action: none; cursor: grab; user-select: none; overflow: hidden; }
+#room canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+#room.drag, #room.drag canvas { cursor: grabbing; }
+.actor-access-list { position: absolute; z-index: 3; left: 8px; bottom: 8px; }
+.actor-access { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.actor-access:focus-visible { position: relative; width: auto; height: auto; padding: 8px 12px; clip-path: none; background: #fbf1df; color: #2b1d14; }
+@media (max-width: 800px) {
+  .play { grid-template-rows: minmax(0, 170px) minmax(0, 1fr); }
+  .dock { max-height: none; height: 100%; }
+  .till { flex-shrink: 0; white-space: nowrap; }
+}
+
+/* Карточки района и событий раскрываются внутри прокручиваемой колонки. */
+.ev[data-event-card] { cursor: pointer; }
+.ev .ev-toggle { display: flex; flex: 1 1 auto; align-items: baseline; gap: 8px; min-width: 0; border: 0; padding: 0; background: transparent; color: var(--cream); text-align: left; }
+.ev .ev-toggle b { flex: 1 1 auto; }
+.ev .ev-chevron { flex: 0 0 auto; color: var(--muted); }
+.ev.expanded .ev-chevron { transform: rotate(180deg); }
+.ev.expanded p { display: block; overflow: visible; -webkit-line-clamp: unset; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ev .ev-detail { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 4px; }
+.ev .ev-detail:empty { display: none; }
+
+
+/* ---------- заведения: вывески и карточка ---------- */
+
+#signs .venue-sign {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 220px;
+  padding: 5px 11px 5px 9px;
+  background: rgba(35, 26, 20, 0.92);
+  border: 1px solid #5b4636;
+  border-radius: 999px;
+  color: var(--cream);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 18px;
+  white-space: nowrap;
+  pointer-events: auto;
+  cursor: pointer;
+  transform-origin: 50% 100%;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+#signs .venue-sign:hover, #signs .venue-sign.sel { border-color: var(--amber); }
+#signs .venue-sign i { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+#signs .venue-sign i.on { background: #6fcf8a; }
+#signs .venue-sign i.off { background: #d9604c; }
+#signs .venue-sign[hidden] { display: none; }
+
+.pc-meta { margin: 0; color: var(--muted); font-size: 13.5px; line-height: 20px; }
+.pc-meta .st { font-weight: 700; }
+.pc-meta .st.on { color: #6fcf8a; }
+.pc-meta .st.off { color: #e07a68; }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.tabs button {
+  position: relative;
+  padding: 6px 11px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 13px;
+}
+.tabs button:hover { color: var(--cream); }
+.tabs button[aria-selected="true"] { background: var(--amber); border-color: var(--amber); color: var(--ink); }
+.tabs .pin { position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: #e0675a; }
+.pc-pane[hidden] { display: none; }
+.pc-list { list-style: none; margin: 0; padding: 0; display: grid; align-content: start; gap: 4px; }
+.pc-rating { margin: 0 0 8px; color: var(--amber); font-weight: 700; }
+
+.gauge { height: 10px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.gauge i { display: block; height: 100%; background: #6fcf8a; transition: width 0.4s linear; }
+.gauge.warn i { background: var(--amber); }
+.gauge.bad i { background: #d9604c; }
+.gauge-line { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 19px; }
+.crew { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.crew li { display: flex; align-items: center; gap: 6px; font-size: 13.5px; }
+
+.inspect {
+  position: absolute;
+  left: 12px;
+  bottom: 70px;
+  z-index: 3;
+  width: min(270px, 70%);
+  padding: 12px 14px;
+  background: rgba(35, 26, 20, 0.96);
+  border: 1px solid #5b4636;
+  border-radius: 14px;
+  color: var(--cream);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.inspect[hidden] { display: none; }
+.inspect h3 { margin: 0 24px 4px 0; font-size: 15px; line-height: 20px; }
+.inspect h3 em { font-style: normal; font-weight: 400; font-size: 12px; color: var(--amber); }
+.inspect p { margin: 0 0 4px; font-size: 13.5px; line-height: 19px; color: var(--muted); }
+.inspect .said { color: var(--cream); font-style: italic; }
+.inspect .hurt { color: #e07a68; }
+.inspect .x { position: absolute; top: 6px; right: 8px; background: transparent; border: 0; color: var(--muted); font-size: 18px; }
+.inspect .link { margin-top: 4px; padding: 5px 10px; background: var(--panel-2); border: 1px solid #5b4636; border-radius: 8px; color: var(--cream); font-size: 13px; }

@@ -1,4 +1,6 @@
+import asyncio
 import json
+import os
 import time
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -8,12 +10,14 @@ from pydantic import BaseModel, Field
 
 import app.db as db
 from app import log
-from app.config import IDLE_PAUSE_S, SPEEDS, STATIC
+from app.config import IDLE_PAUSE_S, STATIC
 from app.digest import digest as make_digest
-from app.engine import Engine
+from app.engine import CITY_FOLK, Engine
+from app.city import City
 from app.hub import Hub
 from app.llm import LLM
-from app.view import snapshot
+from app.mind import Mind
+from app.view import set_city, snapshot
 
 app = FastAPI(title="Loom")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -72,9 +76,16 @@ async def startup() -> None:
     if db.run()["status"] == "running":
         db.set_run(status="paused", phase="")
     app.state.llm = LLM()
-    app.state.engine = Engine(app.state.llm, notify)
+    seed = os.environ.get("SIM_SEED")
+    city = City(int(seed) if seed else None)
+    city.populate(CITY_FOLK)
+    city.set_places(db.places())
+    set_city(city)
+    app.state.engine = Engine(app.state.llm, notify, city)
+    app.state.engine.mind = Mind(app.state.engine)
     app.state.engine.recover()
     hub.start()
+    app.state.city_task = asyncio.create_task(app.state.engine.city_loop(hub.broadcast_frame))
     run = db.run()
     log.event("app.start", db=str(db.DB_PATH) if hasattr(db, "DB_PATH") else None, log=str(log.path()),
               model=db.setting("llm_model"), llm_url=db.setting("llm_base_url"),
@@ -84,6 +95,9 @@ async def startup() -> None:
 @app.on_event("shutdown")
 async def shutdown() -> None:
     log.event("app.stop")
+    task = getattr(app.state, "city_task", None)
+    if task:
+        task.cancel()
     await hub.stop()
     await app.state.llm.aclose()
 
@@ -139,7 +153,6 @@ def api_llm(call_id: int):
 
 class Control(BaseModel):
     action: str
-    speed: float | None = None
 
 
 class Settings(BaseModel):
@@ -164,22 +177,18 @@ class CommandError(Exception):
         self.detail = detail
 
 
-async def do_control(action: str, speed: float | None = None) -> None:
+async def do_control(action: str) -> None:
     engine: Engine = app.state.engine
-    log.event("api.control", action=action, speed=speed)
+    log.event("api.control", action=action)
     if action == "pause":
         engine.pause()
     elif action == "reset":
         await engine.reset()
         HEALTH["at"] = 0
-    elif action == "speed":
-        if speed not in SPEEDS:
-            raise CommandError(400, "Темп: 1, 2, 4 или 8")
-        engine.set_speed(speed)
-    elif action in ("step", "day", "auto", "resume"):
+    elif action in ("day", "auto", "resume"):
         goal = db.run()["goal"] if action == "resume" else action
-        if goal == "idle":
-            goal = "step"
+        if goal not in ("day", "auto"):
+            goal = "auto"
         engine.kick(goal)
     else:
         raise CommandError(400, "Неизвестное действие")
@@ -217,7 +226,7 @@ def do_settings(body: Settings) -> None:
 @app.post("/api/control")
 async def control(body: Control):
     try:
-        await do_control(body.action, body.speed)
+        await do_control(body.action)
     except CommandError as exc:
         raise HTTPException(exc.status, exc.detail) from exc
     return await full_snapshot()
@@ -255,7 +264,7 @@ async def websocket_endpoint(websocket: WebSocket):
             ident, cmd = msg.get("id"), msg.get("cmd")
             try:
                 if cmd == "control":
-                    await do_control(str(msg.get("action") or ""), msg.get("speed"))
+                    await do_control(str(msg.get("action") or ""))
                 elif cmd == "director":
                     await do_director(Direct(text=str(msg.get("text") or "")).text)
                 elif cmd == "end_event":

@@ -56,18 +56,19 @@ class SocketTest(unittest.TestCase):
             with client.websocket_connect("/ws") as one, client.websocket_connect("/ws") as two:
                 one.receive_json()
                 two.receive_json()
-                one.send_json({"id": 7, "cmd": "control", "action": "speed", "speed": 4})
+                one.send_json({"id": 7, "cmd": "control", "action": "pause"})
                 reply = one.receive_json()
                 while reply["type"] != "reply":
                     reply = one.receive_json()
                 self.assertEqual((reply["id"], reply["ok"]), (7, True))
                 got = two.receive_json()
                 for _ in range(10):
-                    if got["type"] == "snapshot" and got["data"]["run"]["speed"] == 4:
+                    if got["type"] == "snapshot" and got["data"]["run"]["status"] == "paused":
                         break
                     got = two.receive_json()
-                self.assertEqual(got["data"]["run"]["speed"], 4)
-                one.send_json({"id": 8, "cmd": "control", "action": "speed", "speed": 3})
+                self.assertEqual(got["data"]["run"]["status"], "paused")
+                self.assertEqual(got["data"]["run"]["speed"], 2)
+                one.send_json({"id": 8, "cmd": "control", "action": "speed"})
                 bad = one.receive_json()
                 while bad["type"] != "reply":
                     bad = one.receive_json()

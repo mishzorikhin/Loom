@@ -66,6 +66,17 @@ def cmd_digest(args) -> None:
     print(f"поток: популярность {traffic['popularity']} (вердиктов {traffic['recent_verdicts']}, средняя оценка {traffic['recent_liked_avg']}), "
           f"советов знакомым {traffic['referral_pool']}, следующий приход {traffic['next_arrival'] or '—'}, "
           f"гостей по дням {traffic['visits_per_day']}")
+    for place_id, row in (data.get("places") or {}).items():
+        today = row.get("today") or {}
+        gpu = f", GPU {int(row['gpu']['util'] * 100)}% {row['gpu']['status']}" if row.get("gpu") else ""
+        print(f"заведение {place_id}: сегодня визитов {today.get('visits', 0)}, выручка {today.get('revenue', 0)} ₽, оценка {today.get('avg_rating')}, "
+              f"в очереди {row['waiting']}, рейтинг {row['rating']}, популярность {row['popularity']}{gpu}")
+    city = data.get("city")
+    if city:
+        print(f"город {city['time']}: людей на улице {city['people_on_street']} (гостей в пути {city['guests_on_the_way']}, ждут светофор "
+              f"{city['waiting_to_cross']}, застряли {city['stuck']}), машин {city['cars']} (на парковке {city['parked']}, свободно мест {city['free_slots']}), "
+              f"разговоров {city['chats']}, не дошли {city['gave_up']}, без парковки {city['no_parking']}, вызовов толпы {city['crowd_calls']}"
+              + (f"; объекты: {city['objects']}" if city["objects"] else "") + (f"; внутри: {city['inside']}" if city["inside"] else ""))
     moods = data.get("moods")
     if moods:
         print(f"настроения: бариста {moods['staff']}, гости пришли {moods['guests_arrived']}, ушли {moods['guests_left']}")

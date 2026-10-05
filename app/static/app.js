@@ -39,7 +39,7 @@ const STATUS = {
   paused: "пауза",
   error: "ошибка модели",
 };
-const AGENT = { client: "гость", staff: "бариста", manager: "управляющий", verdict: "вердикт гостя", critic: "критик", queue: "очередь", narrator: "рассказчик", director: "режиссёр" };
+const AGENT = { client: "гость", staff: "бариста", manager: "управляющий", verdict: "вердикт гостя", critic: "критик", queue: "очередь", narrator: "рассказчик", director: "режиссёр", world: "действия мира" };
 
 const openCalls = new Set();
 const openWeeks = new Set();
@@ -48,7 +48,6 @@ const callCache = new Map();
 const loadingVisits = new Set();
 let selectedGuest = null;
 let focusVisit = null;
-let showReviews = false;
 let pinnedCall = null;
 const seen = new Map();
 let seenDay = null;
@@ -69,6 +68,45 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (ch) => ({
 
 let queued = false;
 
+/* Кадры города приходят по сокету несколько раз в секунду: между двумя последними позиции интерполируются. */
+const cityFrames = [];
+let cityRoster = { peds: {}, cars: {}, inside: {}, slots: [], facts: [], r: 0 };
+const CITY_DELAY = 150;
+
+function pushCityFrame(frame) {
+  cityFrames.push({ frame, at: performance.now() });
+  if (cityFrames.length > 4) cityFrames.shift();
+}
+
+function cityNow() {
+  const n = cityFrames.length;
+  if (!n) return null;
+  const rt = performance.now() - CITY_DELAY;
+  let a = cityFrames[0];
+  let b = cityFrames[0];
+  for (let i = 0; i < n; i += 1) {
+    if (cityFrames[i].at <= rt) a = cityFrames[i];
+    if (cityFrames[i].at > rt) { b = cityFrames[i]; break; }
+    b = cityFrames[i];
+  }
+  const f = a === b ? 1 : Math.min(1, Math.max(0, (rt - a.at) / Math.max(20, b.at - a.at)));
+  const was = new Map(a.frame.p.map((row) => [row[0], row]));
+  const wasCar = new Map(a.frame.c.map((row) => [row[0], row]));
+  const mix = (p, q) => p + (q - p) * f;
+  return {
+    t: mix(a.frame.t, b.frame.t),
+    e: b.frame.e,
+    p: b.frame.p.map((row) => {
+      const old = was.get(row[0]);
+      return old ? [row[0], mix(old[1], row[1]), mix(old[2], row[2]), row[3], row[4]] : row;
+    }),
+    c: b.frame.c.map((row) => {
+      const old = wasCar.get(row[0]);
+      return old ? [row[0], mix(old[1], row[1]), mix(old[2], row[2]), row[3], row[4], mix(old[5], row[5])] : row;
+    }),
+  };
+}
+
 let applying = false;
 let pending = null;
 
@@ -82,6 +120,11 @@ async function applySnapshot(data) {
       snap = pending;
       pending = null;
       snapAt = performance.now();
+      if (snap.city) {
+        cityRoster = snap.city.roster;
+        const last = cityFrames[cityFrames.length - 1];
+        if (!last || last.frame.t !== snap.city.frame.t || last.frame.day !== snap.city.frame.day) pushCityFrame(snap.city.frame);
+      }
       if (selectedGuest && !snap.clients.some((client) => client.id === selectedGuest)) {
         selectedGuest = null;
       }
@@ -128,6 +171,8 @@ function connect() {
     }
     if (msg.type === "snapshot") {
       applySnapshot(msg.data);
+    } else if (msg.type === "city") {
+      pushCityFrame(msg.d);
     } else if (msg.type === "reply" && waiting.has(msg.id)) {
       const done = waiting.get(msg.id);
       waiting.delete(msg.id);
@@ -208,14 +253,13 @@ function render() {
 
 function renderAll() {
   const run = snap.run;
-  document.getElementById("place").textContent = snap.venue.name;
   document.getElementById("viewers-n").textContent = snap.viewers || 1;
   document.getElementById("viewers").title = `Сколько вкладок смотрят эту симуляцию: ${snap.viewers || 1}`;
   const day = document.getElementById("daylabel");
   const clock = document.getElementById("clockline");
   if (!run.day) {
-    day.textContent = "Смена закрыта";
-    clock.textContent = "08:00:00";
+    day.textContent = "День не начат";
+    clock.textContent = "00:00:00";
   } else {
     day.textContent = `День ${run.day}`;
     clock.textContent = formatClock(liveMinutes());
@@ -234,20 +278,11 @@ function renderAll() {
     banner.hidden = true;
   }
   const busy = run.status === "running";
-  document.getElementById("step").disabled = busy;
   document.getElementById("day").disabled = busy;
   document.getElementById("auto").disabled = busy;
   document.getElementById("pause").disabled = !busy;
-  const speed = Number(run.speed || 1);
-  document.querySelectorAll("#speed [data-speed]").forEach((btn) => {
-    btn.setAttribute("aria-pressed", String(Number(btn.dataset.speed) === speed));
-  });
-  document.querySelector("#speed p span").textContent = speed === 1 ? "час за минуту" : `час за ${60 / speed} с`;
   const box = document.getElementById("monitor-box");
   if (run.status === "error") box.open = true;
-  const till = document.getElementById("till");
-  const today = snap.summary && snap.summary.today;
-  till.textContent = rub(today ? today.revenue : 0);
   fillSettings();
   const health = snap.llm_health || {};
   document.getElementById("llm-dot").className = `dot ${health.ok ? "ok" : "bad"}`;
@@ -255,6 +290,8 @@ function renderAll() {
   renderWorld();
   renderEventbar();
   renderReviews();
+  renderPlace();
+  renderInspect();
   renderRibbon();
   renderDots();
   renderDayCard();
@@ -264,8 +301,11 @@ function renderAll() {
 }
 
 function paintDay() {
-  const span = snap.run.close_min - snap.run.open_min;
-  const done = snap.run.day ? (liveMinutes() - snap.run.open_min) / span : 0;
+  const span = snap.run.day_end - snap.run.day_start;
+  const done = snap.run.day ? (liveMinutes() - snap.run.day_start) / span : 0;
+  const bar = document.querySelector(".dayprog");
+  bar.style.setProperty("--open-from", `${(((snap.run.open_min - snap.run.day_start) / span) * 100).toFixed(2)}%`);
+  bar.style.setProperty("--open-to", `${(((snap.run.close_min - snap.run.day_start) / span) * 100).toFixed(2)}%`);
   document.getElementById("dayfill").style.width = `${Math.min(100, Math.max(0, done * 100)).toFixed(1)}%`;
 }
 
@@ -425,7 +465,12 @@ const SEATS = [
 const SEAT_Z = 10;
 const SCALE = 1.3;
 
+/* Сдвиг зала в мире: пока включён зал (`withRoom`), координаты внутри него считаются от его угла. */
+const ISO_OFF = [0, 0];
+
 function iso(x, y, z = 0) {
+  x += ISO_OFF[0];
+  y += ISO_OFF[1];
   return [(x - y) * TW, (x + y) * TH - z];
 }
 
@@ -507,6 +552,9 @@ function frameRoom() {
 /* ---------- свет суток ---------- */
 
 const LIGHT = [
+  [0, "#14183a", 0, 0.2, 0.6],
+  [300, "#14183a", 0, 0.2, 0.6],
+  [390, "#7d7aa8", 0.1, 0.15, 0.82],
   [480, "#cfe6ee", 0.35, 0.06, 1],
   [600, "#a8dcf4", 0.6, 0, 1],
   [780, "#8fd1f2", 0.75, 0, 1],
@@ -514,10 +562,12 @@ const LIGHT = [
   [1080, "#f6c58f", 0.5, 0.18, 0.97],
   [1140, "#f08f6a", 0.3, 0.3, 0.9],
   [1200, "#3a3f6e", 0, 0.2, 0.72],
+  [1290, "#14183a", 0, 0.2, 0.6],
+  [1440, "#14183a", 0, 0.2, 0.6],
 ];
 
 function daylight(mins) {
-  const m = Math.min(1200, Math.max(480, mins));
+  const m = Math.min(1440, Math.max(0, mins));
   let i = 0;
   while (i < LIGHT.length - 2 && m > LIGHT[i + 1][0]) i += 1;
   const a = LIGHT[i];
@@ -529,6 +579,13 @@ function daylight(mins) {
     sun: lerp(a[2], b[2]),
     filter: `sepia(${lerp(a[3], b[3]).toFixed(2)}) brightness(${lerp(a[4], b[4]).toFixed(2)})`,
   };
+}
+
+/* Насколько включены фонари и окна: вечером и ночью полностью, на рассвете гаснут. */
+function nightLevel(light, mins) {
+  const dark = Math.min(1, Math.max(0, (0.5 - light.sun) / 0.5));
+  const lamps = mins >= 900 ? 1 : Math.min(1, Math.max(0, (480 - mins) / 60));
+  return dark * lamps;
 }
 
 let lightKey = "";
@@ -543,8 +600,10 @@ function applyLight(force) {
   const room = document.getElementById("room");
   room.style.setProperty("--sky", light.sky);
   room.style.setProperty("--sun", light.sun.toFixed(2));
+  room.style.setProperty("--night", nightLevel(light, mins).toFixed(2));
   const lit = document.getElementById("lit");
-  if (lit) lit.style.filter = light.filter;
+  if (phaserGame && phaserGame.canvas) phaserGame.canvas.style.filter = light.filter;
+  if (scene) updateSceneLight(light, mins);
 }
 
 /* ---------- комната ---------- */
@@ -838,40 +897,17 @@ function faceIcon(mood) {
   return MOOD[mood] ? `<svg class="face-icon" viewBox="-6 -6 12 12" aria-hidden="true">${faceSvg(mood)}</svg>` : "";
 }
 
-function tagNode(name, clientId, ret, mood) {
-  const attrs = clientId ? { class: "tag", "data-client": clientId } : { class: "tag plain" };
-  const el = nodeOf(
-    `<title></title><rect class="nameplate" y="-9" height="17" rx="8.5"/>
-     <g class="face"></g>
-     <path class="heart" d="M0 3.4 C-5.2 -0.6 -3 -4.4 0 -1.8 C3 -4.4 5.2 -0.6 0 3.4 Z" fill="#e0675a"/>
-     <text y="3.4" text-anchor="middle" font-size="11.5" font-family="Atkinson Hyperlegible, sans-serif" font-weight="700" fill="#2b1d14"></text>`,
-    "g",
-    attrs,
-  );
-  setTag(el, name, ret, mood);
-  return el;
-}
-
-function setTag(el, text, heart, mood) {
-  const key = `${text}|${heart ? 1 : 0}|${mood || ""}`;
-  if (el.dataset.t === key) return;
-  el.dataset.t = key;
-  const face = Boolean(MOOD[mood]);
-  const lead = (face ? 14 : 0) + (heart ? 12 : 0);
-  const w = Math.max(40, [...text].length * 7.1 + 14 + lead);
-  const rect = el.querySelector("rect");
-  rect.setAttribute("x", (-w / 2).toFixed(1));
-  rect.setAttribute("width", w.toFixed(1));
-  const label = el.querySelector("text");
-  label.textContent = text;
-  label.setAttribute("x", lead / 2);
-  const mark = el.querySelector(".heart");
-  mark.style.display = heart ? "" : "none";
-  mark.setAttribute("transform", `translate(${(-w / 2 + 11 + (face ? 13 : 0)).toFixed(1)} 0.4)`);
-  const icon = el.querySelector(".face");
-  icon.innerHTML = face ? faceSvg(mood) : "";
-  icon.setAttribute("transform", `translate(${(-w / 2 + 11).toFixed(1)} 0)`);
-  el.querySelector("title").textContent = mood ? `Настроение: ${mood}` : "";
+function setTag(tag, text, heart, mood) {
+  const label = `${MOOD[mood] ? "   " : ""}${heart ? "♥ " : ""}${text}`;
+  const color = MOOD[mood] ? MOOD[mood].color : "#fbf1df";
+  if (tag.label.text !== label) tag.label.setText(label);
+  tag.label.setBackgroundColor(tag.clientId && selectedGuest === tag.clientId ? "#f0a73a" : color);
+  if (tag.mood !== mood) {
+    if (tag.face) tag.face.destroy();
+    tag.face = MOOD[mood] ? svgObject(faceSvg(mood)).setDepth(10001) : null;
+    tag.mood = mood;
+  }
+  tag.button.textContent = `${label}${mood ? `, ${mood}` : ""}`;
 }
 
 /* ---------- маршруты и жизнь визита ---------- */
@@ -949,7 +985,7 @@ function buildLives(visits) {
   const sorted = [...visits].sort((a, b) => a.id - b.id);
   const built = sorted.map((v) => {
     const start = v.start_min ?? clockMinutes(v.clock);
-    const side = v.id % 2;
+    const side = v.side ?? v.id % 2;
     const walkQ = routeLen(routeToQueue(side, QUEUE[0])) / WALK_SPEED;
     const walkIn = routeLen(routeIn(side)) / WALK_SPEED;
     const waiting = v.status === "waiting";
@@ -959,7 +995,7 @@ function buildLives(visits) {
     const qEnd = waiting ? Infinity : left ? (v.end_min ?? start + walkQ + 1) : serve;
     return {
       key: `v${v.id}`, visit: v, clientId: v.client_id, name: v.client_name, ret: Boolean(v.is_return),
-      look: looksOf(v.client_name), legs: [], side, exitSide: (v.id >> 1) % 2, start, walkQ, walkIn, queued, serve, qEnd,
+      look: looksOf(v.client_name), legs: [], side, exitSide: v.side ?? (v.id >> 1) % 2, start, walkQ, walkIn, queued, serve, qEnd,
       q: queued ? { a: start + walkQ, b: qEnd } : null,
     };
   });
@@ -1052,48 +1088,47 @@ function stateAt(life, t) {
 let scene = null;
 let lives = [];
 let actors = new Map();
-let orderKey = "";
-let frameId = 0;
 
 function buildScene() {
+  if (!phaserScene) return;
   frameRoom();
-  const statics = [];
-  const cups = [];
-  const room = document.getElementById("room");
-  const shadows = [
-    shadowSvg([[2.05, 0.78], [6.45, 0.78], [6.45, 2.5], [2.05, 2.5]]),
-    ...TABLES.map((t) => shadowSvg([[t.x + 0.1, t.y + 0.15], [t.x + 1.3, t.y + 0.15], [t.x + 1.3, t.y + 1.3], [t.x + 0.1, t.y + 1.3]])),
-  ].join("");
-  room.innerHTML = `<defs><clipPath id="doorclip"><polygon points="${DOOR_QUAD.map(pt).join(" ")}"/></clipPath></defs><g id="lit"><g id="land">${landSvg()}</g><g id="backs"></g><g id="behind"></g><g id="base">${wallsSvg()}${sunSvg()}${windowSvg()}${wallDecorSvg()}${rugSvg()}${shadows}</g><g id="doorway" clip-path="url(#doorclip)"><g id="doorhole">${doorHoleSvg()}</g></g><g id="actors"></g><g id="outer"></g><g id="tags"></g></g>`;
-  worldBuild(room);
-  camReset();
-  const layer = document.getElementById("actors");
-  const put = (d, markup) => {
-    const el = nodeOf(markup);
-    layer.appendChild(el);
-    statics.push({ el, d });
-    return el;
-  };
-  put(0.4 + 0.2 + 0.4 + 0.2, plantSvg(0.4, 0.4));
-  put(7.3 + 0.2 + 7.1 + 0.2, plantSvg(7.3, 7.1));
-  put(2.05 + 1.95 + 0.78 + 0.46, counterSvg());
-  put(0.35 + 0.375 + 1.0 + 0.75, deskSvg());
-  TABLES.forEach((table) => {
-    const d = table.x + 0.55 + table.y + 0.55;
-    put(d, tableSvg(table.x, table.y, false));
-    const cup = put(d + 0.01, box(table.x + 0.4, table.y + 0.42, 0.2, 0.2, 5, "#6b4426", "#fffaf0", "#d8cdb8", 17));
-    cup.style.display = "none";
-    cups.push(cup);
+  scene = {};
+  worldBuild();
+  ROOM_DEFS.forEach((def) => {
+    const room = newRoom(def);
+    ROOMS.set(def.id, room);
+    buildRoom(room);
   });
-  SEATS.forEach((seat) => put(seat.at[0] + seat.at[1] - 0.05, chairSvg(seat.at[0], seat.at[1], seat.face)));
-  scene = { statics, cups };
-  actors = new Map();
-  orderKey = "";
+  camReset();
+}
+
+/* Зал заведения: стены, окно, стойка, мебель. Рисуется один раз, люди двигаются в `drawRoom`. */
+function buildRoom(room) {
+  withRoom(room, () => {
+    const theme = THEMES[room.theme];
+    const statics = [];
+    const cups = [];
+    scene.statics = statics;
+    scene.cups = cups;
+    scene.base = svgObject(theme.base());
+    scene.sun = svgObject(sunSvg());
+    scene.door = svgObject(doorHoleSvg()).setAlpha(0);
+    const mask = phaserScene.make.graphics({ x: 0, y: 0, add: false });
+    mask.fillStyle(0xffffff).fillPoints(DOOR_QUAD.map((p) => { const [x, y] = iso(...p); return { x, y }; }), true);
+    scene.doorMask = mask.createGeometryMask();
+    scene.maskGraphics = mask;
+    const put = (d, markup, box) => {
+      const el = svgObject(markup);
+      statics.push({ el, d: d + room.ox + room.oy, box: box.map((v, i) => v + (i < 2 ? room.ox : room.oy)) });
+      return el;
+    };
+    theme.furniture(put, cups);
+  });
 }
 
 function turnInfo(stage) {
   const cur = snap.current_visit;
-  if (!cur) return { guestTurn: false, staffId: null, visitId: null };
+  if (!cur || (cur.place_id || "cafe") !== ROOM.id) return { guestTurn: false, staffId: null, visitId: null };
   const spoken = cur.lines ? cur : visitCache.get(cur.id);
   const last = spoken && spoken.lines && spoken.lines[spoken.lines.length - 1];
   const phase = snap.run.phase;
@@ -1103,82 +1138,172 @@ function turnInfo(stage) {
   return { guestTurn, staffId, visitId: cur.id };
 }
 
+function selectActor(clientId) {
+  if (cameraMoved || !snap) return;
+  selectedGuest = selectedGuest === clientId ? null : clientId;
+  render();
+}
+
 function makeActor(key, look, name, clientId, staff, accent, ret = false, mood = "") {
-  const g = nodeOf("", "g", clientId ? { class: "person", "data-client": clientId, tabindex: 0, role: "button" } : { class: "person" });
-  document.getElementById("actors").appendChild(g);
-  const tag = tagNode(name, clientId, ret, mood);
-  document.getElementById("tags").appendChild(tag);
-  const actor = { key, g, tag, look, staff, accent, pose: "", clientId, name };
+  const g = phaserScene.add.container(0, 0);
+  const ring = phaserScene.add.ellipse(0, 1, 26, 10).setStrokeStyle(2, 0xf0a73a).setVisible(false);
+  g.add(ring);
+  const label = phaserScene.add.text(0, 0, name, {
+    fontFamily: "Atkinson Hyperlegible, sans-serif", fontSize: "12px", fontStyle: "bold",
+    color: "#2b1d14", backgroundColor: "#fbf1df", padding: { x: 7, y: 3 },
+  }).setOrigin(0.5).setDepth(10000);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "actor-access";
+  button.hidden = !clientId;
+  if (clientId) {
+    button.dataset.client = clientId;
+    g.setData("clientId", clientId);
+    label.setData("clientId", clientId);
+    g.setInteractive(new Phaser.Geom.Rectangle(-14, -60, 28, 68), Phaser.Geom.Rectangle.Contains);
+    g.on("pointerover", () => { ring.setVisible(true); phaserGame.canvas.title = tag.button.textContent; });
+    g.on("pointerout", () => { ring.setVisible(selectedGuest === clientId); phaserGame.canvas.title = ""; });
+    g.on("pointerup", () => selectActor(clientId));
+    label.setInteractive({ useHandCursor: true }).on("pointerup", () => selectActor(clientId));
+  }
+  document.getElementById("actor-access").appendChild(button);
+  const tag = { label, button, clientId };
+  const actor = { key, g, ring, tag, look, staff, accent, pose: "", clientId, name, parts: [] };
+  setTag(tag, name, ret, mood);
   actors.set(key, actor);
-  orderKey = "";
   return actor;
 }
 
 function dropActor(actor) {
-  actor.g.remove();
-  actor.tag.remove();
+  actor.parts.forEach((part) => part.destroy());
+  actor.g.destroy();
+  actor.tag.label.destroy();
+  if (actor.tag.face) actor.tag.face.destroy();
+  actor.tag.button.remove();
   actors.delete(actor.key);
-  orderKey = "";
 }
 
 function setPose(actor, pose, carry = false) {
   const key = `${pose}|${carry ? 1 : 0}`;
   if (actor.pose === key) return;
-  const hadOn = actor.g.classList.contains("on");
   actor.pose = key;
-  actor.g.innerHTML = figureSvg(actor.look, pose, actor.staff, actor.accent, carry);
-  actor.g.classList.toggle("walk", pose === "walk");
-  actor.g.classList.toggle("on", hadOn);
-  actor.g.classList.toggle("mgr", actor.key === "mgr");
+  actor.parts.forEach((part) => part.destroy());
+  // SVG служит только источником текстур. Конечности — отдельные объекты Phaser.
+  const source = nodeOf(figureSvg(actor.look, pose, actor.staff, actor.accent, carry));
+  source.querySelector(".ring").remove();
+  const moving = [...source.querySelectorAll(".leg, .arm")];
+  const seated = pose === "sit" ? 13 : 0;
+  const limbParts = moving.map((node) => {
+    const markup = node.outerHTML;
+    const isArm = node.classList.contains("arm");
+    const sign = node.classList.contains("leg-l") || node.classList.contains("arm-r") ? 1 : -1;
+    node.remove();
+    const obj = svgObject(markup);
+    actor.g.add(obj);
+    return { obj, isArm, sign, seated };
+  });
+  const torso = svgObject(source.innerHTML);
+  actor.g.add(torso);
+  // Руки впереди корпуса, ноги позади него.
+  limbParts.filter((p) => p.isArm).forEach((p) => actor.g.bringToTop(p.obj));
+  actor.parts = [...limbParts.map((p) => p.obj), torso];
+  actor.limbs = limbParts;
+  actor.torso = torso;
+  actor.walking = pose === "walk";
+}
+
+/* Данные заведения для зала: у кофейни это верх снимка, у остальных place_views. */
+function roomData(room) {
+  return placeData(room.id);
 }
 
 function drawActors() {
   if (!snap) return;
   if (!scene) buildScene();
+  if (!scene) return;
   const running = snap.run.status === "running";
   document.getElementById("room").classList.toggle("still", !running);
   const t = snap.run.day ? liveMinutes() : -1;
+  const rows = [];
+  const stages = new Map();
+  let follow = null;
+  ROOMS.forEach((room) => {
+    const result = withRoom(room, () => drawRoom(room, t, running, rows));
+    result.stages.forEach((value, key) => stages.set(key, value));
+    if (result.followAt) follow = { room, at: result.followAt };
+  });
+  drawAmbient(t >= 0 ? t : 540, rows);
+  const spd = running && !snap.run.thinking ? Math.min(2, Number(snap.run.speed) || 1) : 1;
+  if (spd !== stepSpeed) {
+    stepSpeed = spd;
+    document.getElementById("room").style.setProperty("--spd", String(spd));
+  }
+  ROOMS.forEach((room) => {
+    room.actors.forEach((actor) => {
+      const label = actor.tag.label;
+      if (actor.tag.face) actor.tag.face.setPosition(label.x - label.width * tagK / 2 + 11 * tagK, label.y).setScale(tagK).setVisible(label.visible).setAlpha(label.alpha);
+      const swing = running && actor.walking ? Math.sin(t * 13) : 0;
+      actor.limbs.forEach((part) => part.obj.setPosition(part.sign * swing * (part.isArm ? 1.6 : 2), part.isArm ? part.seated : Math.abs(swing) * -1.5));
+      if (actor.walking) actor.torso.setY(running ? -Math.abs(swing) * 0.8 : 0);
+    });
+  });
+  if (follow) withRoom(follow.room, () => followBubble(follow.at));
+  else followBubble(null);
+  const cur = snap.current_visit;
+  document.querySelectorAll("#float [data-visit]").forEach((el) => {
+    const done = cur && cur.status !== "open" && cur.status !== "waiting";
+    const here = stages.get(Number(el.dataset.visit));
+    el.style.display = done && here !== "counter" && here !== "in" && here !== "queue" ? "none" : "";
+  });
+}
+
+/* Один зал: персонал, гости по часам симуляции, чашки, дверь. В `rows` попадают предметы и люди для общей сортировки по глубине. */
+function drawRoom(room, t, running, rows) {
+  const data = roomData(room);
+  const theme = THEMES[room.theme];
+  const { ox, oy } = room;
   const curLife = snap.current_visit && lives.find((row) => row.visit.id === snap.current_visit.id);
   const curState = curLife && t >= 0 ? stateAt(curLife, t) : null;
   const turn = turnInfo(curState ? curState.stage : "away");
   const wanted = new Set();
   const seated = new Set();
   const dyn = [];
+  const overlays = [scene.sun, scene.door];
   const bob = running ? Math.sin(performance.now() / 420) * 0.8 : 0;
+  const put = (el, x, y) => dyn.push({ el, d: x + y + ox + oy, box: [x - 0.3 + ox, x + 0.3 + ox, y - 0.3 + oy, y + 0.3 + oy] });
 
-  (snap.staff || []).forEach((person) => {
+  (data.staff || []).forEach((person, index) => {
     const key = `staff:${person.id}`;
     wanted.add(key);
-    const at = STAFF_AT[person.id] || STAFF_AT.anya;
-    const look = { ...(STAFF_LOOK[person.id] || STAFF_LOOK.anya), pants: "#2f3a45" };
-    const actor = actors.get(key) || makeActor(key, look, person.name, null, true, look.accent);
+    const at = STAFF_SLOTS[index % STAFF_SLOTS.length];
+    const look = { ...(STAFF_LOOKS[person.id] || STAFF_LOOKS.anya), pants: "#2f3a45" };
+    const actor = actors.get(key) || makeActor(key, look, person.name, null, theme.apron, look.accent);
     setPose(actor, "stand");
     const [sx, sy] = iso(at[0], at[1], 0);
-    actor.g.setAttribute("transform", `translate(${sx.toFixed(1)} ${(sy + (person.id === "mark" ? -bob : bob)).toFixed(1)}) scale(${SCALE})`);
+    actor.g.setPosition(sx, sy + (index % 2 ? -bob : bob)).setScale(SCALE);
     setTag(actor.tag, person.served_today ? `${person.name} · ${person.served_today}` : person.name, false, person.mood);
     const [tx, ty] = iso(at[0], at[1], 40);
-    const dx = person.id === "mark" ? 56 : -56;
-    actor.tag.setAttribute("transform", `translate(${(tx + dx).toFixed(1)} ${ty.toFixed(1)}) scale(${tagK.toFixed(2)})`);
-    actor.tag.style.display = turn.staffId === person.id ? "none" : "";
-    dyn.push({ el: actor.g, d: at[0] + at[1] });
+    const dx = index % 2 ? 56 : -56;
+    actor.tag.label.setPosition(tx + dx, ty).setScale(tagK);
+    actor.tag.label.setVisible(layers.names && CAM.z >= 0.62 && turn.staffId !== person.id);
+    put(actor.g, at[0], at[1]);
   });
 
-  const mgrOn = String(snap.run.phase || "").startsWith("Управляющий");
+  const mgrOn = String(snap.run.phase || "").startsWith(room.managerPhase);
   let mgr = actors.get("mgr");
   if (!mgr && mgrOn) {
     mgr = makeActor("mgr", MGR_LOOK, "Управляющий", null, false, null);
-    mgr.g.style.opacity = 0;
+    mgr.g.setAlpha(0);
   }
   if (mgr) {
     wanted.add("mgr");
     setPose(mgr, "stand");
     const [mx, my] = iso(MGR_AT[0], MGR_AT[1], 0);
-    mgr.g.setAttribute("transform", `translate(${mx.toFixed(1)} ${my.toFixed(1)}) scale(${SCALE})`);
-    mgr.g.style.opacity = mgrOn ? 1 : 0;
+    mgr.g.setPosition(mx, my).setScale(SCALE);
+    mgr.g.setAlpha(mgrOn ? 1 : 0);
     const [gx, gy] = iso(MGR_AT[0], MGR_AT[1], 78);
-    mgr.tag.setAttribute("transform", `translate(${gx.toFixed(1)} ${gy.toFixed(1)}) scale(${tagK.toFixed(2)})`);
-    mgr.tag.style.display = "none";
-    dyn.push({ el: mgr.g, d: MGR_AT[0] + MGR_AT[1] });
+    mgr.tag.label.setPosition(gx, gy).setScale(tagK).setVisible(false);
+    put(mgr.g, MGR_AT[0], MGR_AT[1]);
   }
 
   let followAt = null;
@@ -1198,59 +1323,38 @@ function drawActors() {
     setPose(actor, st.pose, st.carry);
     const z = st.pose === "sit" ? SEAT_Z : 0;
     const [sx, sy] = iso(st.x, st.y, z);
-    actor.g.setAttribute("transform", `translate(${sx.toFixed(1)} ${sy.toFixed(1)}) scale(${(facing(actor, sx) * SCALE).toFixed(2)} ${SCALE})`);
-    actor.g.setAttribute("opacity", st.alpha.toFixed(2));
+    actor.g.setPosition(sx, sy).setScale(facing(actor, sx) * SCALE, SCALE);
+    actor.g.setAlpha(st.alpha);
     const on = selectedGuest === life.clientId;
-    actor.g.classList.toggle("on", on);
-    actor.tag.querySelector(".nameplate").classList.toggle("on", on);
+    actor.ring.setVisible(on);
     const lift = st.stage === "queue" ? 78 + 20 * (Math.round(queueIdx(life, t)) % 2) : 78;
     const [tx, ty] = iso(st.x, st.y, st.pose === "sit" ? z + 62 : lift);
-    actor.tag.setAttribute("transform", `translate(${tx.toFixed(1)} ${ty.toFixed(1)}) scale(${tagK.toFixed(2)})`);
-    actor.tag.setAttribute("opacity", st.alpha.toFixed(2));
+    actor.tag.label.setPosition(tx, ty).setScale(tagK).setAlpha(st.alpha);
     const speaking = turn.visitId === life.visit.id;
     const zone = zoneOf(st.x, st.y);
     const hidden = zone === "door" || (st.x > -2.6 && st.x < 0.05);
-    actor.tag.style.display = hidden || (speaking && turn.guestTurn) ? "none" : "";
+    actor.tag.label.setVisible(layers.names && CAM.z >= 0.62 && !hidden && !(speaking && turn.guestTurn));
+    actor.tag.button.hidden = hidden || st.alpha < 0.1;
     if (speaking) followAt = { x: st.x, y: st.y };
     if (st.pose === "sit") seated.add(st.seat % TABLES.length);
     if (Math.abs(st.y - DOOR[1]) < 0.9 && st.x > -1.6 && st.x < 1 && st.alpha > 0.1) doorBusy = true;
-    if (zone === "in") {
-      dyn.push({ el: actor.g, d: st.x + st.y });
-    } else {
-      const host = document.getElementById(zone === "door" ? "doorway" : "behind");
-      if (actor.g.parentNode !== host) host.appendChild(actor.g);
-    }
+    actor.g.clearMask();
+    if (zone === "door") {
+      actor.g.setMask(scene.doorMask);
+      overlays.push(actor.g);
+    } else put(actor.g, st.x, st.y);
   });
 
   actors.forEach((actor, key) => {
     if (!wanted.has(key)) dropActor(actor);
   });
-  drawAmbient(t >= 0 ? t : 540);
-  scene.cups.forEach((cup, index) => { cup.style.display = seated.has(index) ? "" : "none"; });
-  document.getElementById("doorhole").style.opacity = doorBusy ? 1 : 0;
-  const spd = running && !snap.run.thinking ? Math.min(2, Number(snap.run.speed) || 1) : 1;
-  if (spd !== stepSpeed) {
-    stepSpeed = spd;
-    document.getElementById("room").style.setProperty("--spd", String(spd));
-  }
-
-  const all = [...scene.statics, ...dyn].sort((a, b) => a.d - b.d);
-  const key = all.map((row) => (row.el.dataset.k ||= String(++stamp))).join(",");
-  if (key !== orderKey) {
-    const layer = document.getElementById("actors");
-    all.forEach((row) => layer.appendChild(row.el));
-    orderKey = key;
-  }
-  followBubble(followAt);
-  const cur = snap.current_visit;
-  document.querySelectorAll("#float [data-visit]").forEach((el) => {
-    const done = cur && cur.status !== "open" && cur.status !== "waiting";
-    const here = stages.get(Number(el.dataset.visit));
-    el.style.display = done && here !== "counter" && here !== "in" && here !== "queue" ? "none" : "";
-  });
+  scene.cups.forEach((cup, index) => cup.setVisible(seated.has(index)));
+  scene.door.setAlpha(doorBusy ? 1 : 0);
+  rows.push({ el: scene.base, d: ox + oy - 1, box: [ox - 0.3, ox + ROOM_W, oy - 0.3, oy + ROOM_D], after: overlays },
+    ...scene.statics, ...dyn);
+  return { stages, followAt };
 }
 
-let stamp = 0;
 let stepSpeed = 1;
 
 function facing(actor, sx) {
@@ -1280,30 +1384,20 @@ function followBubble(at) {
   bubble.style.top = `${pos.top.toFixed(0)}px`;
 }
 
-function frame() {
-  frameId = 0;
-  drawActors();
-  if (snap && snap.run.status === "running") frameId = requestAnimationFrame(frame);
-}
-
-function wake() {
-  if (!frameId) frameId = requestAnimationFrame(frame);
-}
-
 function renderWorld() {
   if (!scene) buildScene();
-  lives = snap.run.day ? buildLives(snap.day_visits || []) : [];
-  const open = snap.run.day && !snap.run.day_closed;
-  document.getElementById("room").style.setProperty("--sign", open ? "#6fcf8a" : "#d9604c");
+  ROOMS.forEach((room) => withRoom(room, () => {
+    lives = snap.run.day ? buildLives(roomData(room).day_visits || []) : [];
+  }));
   applyLight(true);
   renderBoard();
   renderFloat();
   drawActors();
-  wake();
 }
 
 function renderBoard() {
-  const week = snap.weeks[0];
+  const data = placeData(placeId || "cafe");
+  const week = data.weeks[0];
   if (!weekSeen) {
     lastWeekId = week ? week.id : 0;
     weekSeen = true;
@@ -1323,7 +1417,7 @@ function renderBoard() {
     });
   }
   const fresh = new Set(week ? (week.changes || []).filter((change) => change.op === "add_item").map((change) => change.item_id) : []);
-  const menu = snap.menu.filter((item) => item.available).map((item) => {
+  const menu = data.menu.filter((item) => item.available).map((item) => {
     const klass = flashing && flashItems.has(item.id) ? "flash" : "";
     const moved = trend.get(item.id);
     const arrow = moved
@@ -1332,7 +1426,7 @@ function renderBoard() {
     const badge = fresh.has(item.id) ? `<em class="new" title="Новинка этой недели">new</em>` : "";
     return `<li class="${klass}"><span>${esc(item.name)}${badge}</span><span>${arrow}${rub(item.price)}</span></li>`;
   }).join("");
-  document.getElementById("board").innerHTML = `<h2>Меню</h2><ul class="menu">${menu}</ul>`;
+  document.getElementById("board").innerHTML = `<h2>${placeId && placeId !== "cafe" ? "Прайс" : "Меню"}</h2><ul class="menu">${menu}</ul>`;
 }
 
 function clip(text) {
@@ -1376,7 +1470,7 @@ function bubbleAt(at, who, body, o = {}) {
 }
 
 function speechBubbles(visit) {
-  if (/^(Рассказчик|Режиссёр)/.test(String(snap.run.phase || ""))) return "";
+  if (/^(Рассказчик|Режиссёр|Мир)/.test(String(snap.run.phase || ""))) return "";
   if (String(snap.run.phase || "").startsWith("Управляющий")) {
     return bubbleAt({ x: MGR_AT[0], y: MGR_AT[1], z: 82 }, "Управляющий", `<span class="dots"><i></i><i></i><i></i></span>`);
   }
@@ -1408,8 +1502,167 @@ function speechBubbles(visit) {
 function renderFloat() {
   const closed = snap.run.day
     ? ""
-    : `<div class="speech closed" style="left:50%;top:46%"><b>Смена закрыта</b><p>Пустить время — и гости придут сами.</p></div>`;
-  document.getElementById("float").innerHTML = closed + speechBubbles(snap.current_visit);
+    : `<div class="speech closed" style="left:50%;top:46%"><b>День не начат</b><p>Пустить время — и гости придут сами.</p></div>`;
+  const cur = snap.current_visit;
+  const bubbles = withRoom(roomOf(cur ? cur.place_id : "cafe"), () => speechBubbles(cur));
+  document.getElementById("float").innerHTML = closed + bubbles;
+  placeSigns();
+}
+
+/* ---------- заведения: вывеска у здания и карточка ---------- */
+
+let placeId = null; // заведение, открытое в карточке
+let placeTab = "menu";
+const PLACE_TABS = {
+  cafe: [["menu", "Меню"], ["ribbon", "Лента дня"], ["reviews", "Отзывы"], ["notes", "Записки"]],
+  neuraldeep: [["menu", "Прайс"], ["ribbon", "Лента дня"], ["reviews", "Отзывы"], ["notes", "Записки"], ["info", "Статус"]],
+};
+const PLACE_INFO_TABS = [["info", "Обзор"]];
+/* Над какой точкой здания висит вывеска: x, y, высота. */
+const SIGN_AT = { cafe: [4, 0, 98], neuraldeep: [4, 0, 120] };
+
+/* Данные заведения: у кофейни они лежат в снимке на верхнем уровне, у остальных в place_views. */
+function placeData(id) {
+  if (!id || id === "cafe") return snap;
+  return (snap.place_views || {})[id] || { menu: [], weeks: [], day_visits: [], reviews: { avg: null, count: 0, latest: [] }, summary: {}, staff: [] };
+}
+
+function placeOf(id) {
+  return (snap.places || []).find((row) => row.id === id) || null;
+}
+
+function placeIsOpen(place) {
+  const mins = liveMinutes();
+  return Boolean(snap.run.day) && mins >= place.open_min && mins < place.close_min;
+}
+
+function hoursText(place) {
+  return place.open_min === 0 && place.close_min >= 1440 ? "круглосуточно" : `${formatClock(place.open_min).slice(0, 5)}–${formatClock(place.close_min).slice(0, 5)}`;
+}
+
+function openPlace(id) {
+  placeId = id;
+  if (id) focusPlace(id);
+  const tabs = id ? (PLACE_TABS[id] || PLACE_INFO_TABS) : [];
+  if (id && !tabs.some(([key]) => key === placeTab)) placeTab = tabs[0][0];
+  if (snap) {
+    renderBoard();
+    renderRibbon();
+    renderReviews();
+    renderPlace();
+    renderManager();
+    placeSigns();
+  }
+}
+
+/* ---------- осмотр человека или машины в городе ---------- */
+
+let inspected = null;
+const CAR_NAMES = ["Седан", "Хэтчбек", "Фургон"];
+
+function inspectCity(kind, id) {
+  inspected = inspected && inspected.kind === kind && inspected.id === id ? null : { kind, id };
+  renderInspect();
+}
+
+function renderInspect() {
+  const root = document.getElementById("inspect");
+  if (!root) return;
+  const meta = inspected && (inspected.kind === "ped" ? cityRoster.peds[inspected.id] : cityRoster.cars[inspected.id]);
+  if (!inspected || !meta) {
+    root.hidden = true;
+    return;
+  }
+  root.hidden = false;
+  if (inspected.kind === "car") {
+    const owner = meta.own && cityRoster.peds[meta.own];
+    root.innerHTML = `<button type="button" class="x" data-inspect-close aria-label="Закрыть">×</button>
+      <h3>${CAR_NAMES[meta.k] || "Машина"}${meta.taxi ? " · такси" : ""}</h3>
+      <p>${meta.slot !== null ? `Паркуется на месте ${meta.slot + 1}` : "Едет по улице"}${owner ? `, за рулём ${esc(owner.n)}` : ""}.</p>`;
+    return;
+  }
+  const mood = meta.m || "спокойствие";
+  root.innerHTML = `<button type="button" class="x" data-inspect-close aria-label="Закрыть">×</button>
+    <h3>${esc(meta.n)}${meta.c ? ' <em>гость</em>' : ""}</h3>
+    <p>${faceIcon(mood)}${esc(mood)} · ${esc(meta.t || "")}</p>
+    <p>${esc(meta.g)}</p>
+    ${meta.h < 1 ? `<p class="hurt">Здоровье ${Math.round(meta.h * 100)}%</p>` : ""}
+    ${meta.say ? `<p class="said">«${esc(meta.say)}»</p>` : ""}
+    ${meta.c ? `<button type="button" class="link" data-client="${meta.c}">Разговоры гостя</button>` : ""}`;
+}
+
+function placeSigns() {
+  const root = document.getElementById("signs");
+  if (!snap || !root) return;
+  const places = snap.places || [];
+  places.forEach((place) => {
+    let btn = root.querySelector(`[data-place="${place.id}"]`);
+    if (!btn) {
+      btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "venue-sign";
+      btn.dataset.place = place.id;
+      root.appendChild(btn);
+    }
+    const open = placeIsOpen(place);
+    const label = `${place.name} · ${open ? "открыто" : "закрыто"}`;
+    if (btn.dataset.label !== label) {
+      btn.dataset.label = label;
+      btn.innerHTML = `<i class="${open ? "on" : "off"}"></i>${esc(place.name)}`;
+      btn.title = `${place.name}: ${open ? "открыто" : "закрыто"}, ${hoursText(place)}`;
+    }
+    btn.classList.toggle("sel", place.id === placeId);
+    const at = SIGN_AT[place.id] || [4, 0, 98];
+    const room = ROOMS.get(place.id);
+    const pos = room ? withRoom(room, () => spot(at[0], at[1], at[2])) : spot(place.door_x, place.door_y, 78);
+    btn.style.left = `${pos.left}px`;
+    btn.style.top = `${pos.top}px`;
+    btn.style.transform = `translate(-50%, -100%) scale(${Math.min(1, Math.max(0.62, pos.k)).toFixed(2)})`;
+    btn.hidden = pos.k < 0.5;
+  });
+}
+
+function renderPlace() {
+  const root = document.getElementById("placecard");
+  const place = placeId && placeOf(placeId);
+  if (!place) {
+    root.hidden = true;
+    return;
+  }
+  root.hidden = false;
+  document.getElementById("pc-name").textContent = place.name;
+  const open = placeIsOpen(place);
+  const parts = [`<span class="st ${open ? "on" : "off"}">${open ? "Открыто" : "Закрыто"}</span>`, hoursText(place)];
+  const data = placeData(place.id);
+  if (PLACE_TABS[place.id]) {
+    const today = data.summary && data.summary.today;
+    const stats = data.reviews || { avg: null, count: 0 };
+    parts.push(`касса ${rub(today ? today.revenue : 0)}`);
+    if (stats.avg !== null) parts.push(`★ ${stats.avg.toFixed(1).replace(".", ",")} · ${stats.count}`);
+    if (data.gpu) parts.push(`GPU ${Math.round(data.gpu.util * 100)}% · ${data.gpu.status}`);
+  }
+  document.getElementById("pc-meta").innerHTML = parts.join(" · ");
+  const tabs = PLACE_TABS[place.id] || PLACE_INFO_TABS;
+  if (!tabs.some(([key]) => key === placeTab)) placeTab = tabs[0][0];
+  const weeks = data.weeks || [];
+  const unread = PLACE_TABS[place.id] && weeks.length && weeks[0].id > noteSeen(place.id) && placeTab !== "notes";
+  document.getElementById("pc-tabs").innerHTML = tabs.map(([key, name]) =>
+    `<button type="button" role="tab" data-tab="${key}" aria-selected="${key === placeTab}">${name}${key === "notes" && unread ? '<i class="pin"></i>' : ""}</button>`).join("");
+  root.querySelectorAll(".pc-pane").forEach((pane) => { pane.hidden = pane.dataset.pane !== placeTab; });
+  document.getElementById("pc-info").innerHTML = placeInfo(place, data);
+}
+
+function placeInfo(place, data) {
+  const note = place.note ? `<p>${esc(place.note)}</p>` : "";
+  if (!data.gpu) return note;
+  const util = Math.min(1.2, data.gpu.util);
+  const klass = data.gpu.util >= 0.9 ? "bad" : data.gpu.util >= 0.85 ? "warn" : "ok";
+  const crew = (data.staff || []).map((row) => `<li><b>${esc(row.name)}</b> · ${faceIcon(row.mood || "спокойствие")}${esc(row.mood || "спокойствие")} · оформил сегодня ${row.served_today}</li>`).join("");
+  return `${note}
+    <div class="gauge ${klass}" title="Нагрузка на GPU"><i style="width:${Math.min(100, util * 100).toFixed(0)}%"></i></div>
+    <p class="gauge-line">Нагрузка на GPU ${Math.round(data.gpu.util * 100)}% — ${esc(data.gpu.status)}. Выше 90% оформление идёт дольше, оценки ниже, от 100% безлимит не оформляют.</p>
+    <ul class="crew">${crew}</ul>
+    <p class="quiet-note">API: api.neuraldeep.ru/v1 · кабинет и прайс: neuraldeep.ru · статус: status.neuraldeep.ru</p>`;
 }
 
 function renderChats() {
@@ -1439,43 +1692,32 @@ function renderChats() {
 }
 
 const openNotes = new Set();
-let showNotes = false;
 
-function noteSeen() {
+function noteSeen(id = "cafe") {
   try {
-    return Number(localStorage.getItem("loom-note-seen") || 0);
+    return Number(localStorage.getItem(id === "cafe" ? "loom-note-seen" : `loom-note-seen-${id}`) || 0);
   } catch (err) {
     return 0;
   }
 }
 
-function markNotesSeen() {
+function markNotesSeen(id = "cafe") {
   try {
-    if (snap.weeks.length) localStorage.setItem("loom-note-seen", String(snap.weeks[0].id));
+    const weeks = placeData(id).weeks;
+    if (weeks.length) localStorage.setItem(id === "cafe" ? "loom-note-seen" : `loom-note-seen-${id}`, String(weeks[0].id));
   } catch (err) { /* без хранилища точка «новая» просто не запоминается */ }
 }
 
-/* Записки управляющего: кнопка в шапке и окно слева. На сцене их нет. */
+/* Записки управляющего: вкладка карточки кофейни. На сцене их нет. */
 function renderManager() {
-  const button = document.getElementById("notes-btn");
   const root = document.getElementById("manager");
-  if (!snap.weeks.length) {
-    button.hidden = true;
-    root.hidden = true;
-    root.innerHTML = "";
+  const weeks = placeData(placeId || "cafe").weeks;
+  if (!weeks.length) {
+    root.innerHTML = `<p class="quiet-note">Записок пока нет: управляющий пишет их после каждого пятого дня.</p>`;
     return;
   }
-  button.hidden = false;
-  document.getElementById("notes-n").textContent = String(snap.weeks.length);
-  button.setAttribute("aria-expanded", String(showNotes));
-  button.querySelector(".pin").hidden = showNotes || snap.weeks[0].id <= noteSeen();
-  if (!showNotes) {
-    root.hidden = true;
-    return;
-  }
-  markNotesSeen();
-  root.hidden = false;
-  const list = snap.weeks.map((week, index) => {
+  if (placeId && placeTab === "notes") markNotesSeen(placeId);
+  root.innerHTML = weeks.map((week, index) => {
     const changes = (week.changes || []).map((change) => {
       if (change.op === "add_item") return `${change.name}: добавил в меню, ${rub(change.price)}`;
       if (change.op === "set_price") return `${change.name}: ${rub(change.price_before)} → ${rub(change.price_after)}`;
@@ -1493,7 +1735,6 @@ function renderManager() {
       </details>
     </details>`;
   }).join("");
-  root.innerHTML = `<div class="drawer-head"><h2>Записки <span>управляющего</span></h2><button type="button" id="close-notes">Закрыть</button></div>${list}`;
 }
 
 function renderMonitor() {
@@ -1565,27 +1806,36 @@ function outcomeText(v) {
   return "у прилавка…";
 }
 
+const openEventCards = new Set();
+
 function renderEventbar() {
   const root = document.getElementById("eventbar");
   const events = snap.events || [];
   const phase = String(snap.run.phase || "");
-  const thinking = /^(Рассказчик|Режиссёр)/.test(phase);
-  if (!events.length && !thinking) {
+  const thinking = /^(Рассказчик|Режиссёр|Мир)/.test(phase);
+  if (!events.length && !thinking && !snap.district) {
     root.hidden = true;
     root.innerHTML = "";
     return;
   }
   root.hidden = false;
   const voice = snap.district;
+  const districtKey = `district:${snap.run.day}`;
+  const valid = new Set([districtKey, ...events.map((e) => `event:${e.id}`)]);
+  for (const key of openEventCards) if (!valid.has(key)) openEventCards.delete(key);
+  const districtOpen = openEventCards.has(districtKey);
   const district = voice
-    ? `<article class="ev district" title="${esc(voice.why || "")}"><b>Район</b><div class="fxs"><span class="fx">спрос ×${voice.traffic}</span><span class="fx">новых ${Math.round(voice.newcomers * 100)}%</span></div>${voice.buzz ? `<p>«${esc(voice.buzz)}»</p>` : ""}</article>`
+    ? `<article class="ev district${districtOpen ? " expanded" : ""}" data-event-card="${districtKey}"><header><button type="button" class="ev-toggle" aria-expanded="${districtOpen}" aria-controls="district-detail"><b>Район</b><span class="ev-chevron" aria-hidden="true">⌄</span></button></header><div class="fxs"><span class="fx">спрос ×${voice.traffic}</span><span class="fx">новых ${Math.round(voice.newcomers * 100)}%</span></div>${voice.buzz ? `<p>«${esc(voice.buzz)}»</p>` : ""}<div id="district-detail" class="ev-detail"${districtOpen ? "" : " hidden"}>${voice.why ? `<p>${esc(voice.why)}</p>` : ""}</div></article>`
     : "";
   const shown = [...events].reverse().slice(0, 3);
   const hidden = events.length - shown.length;
   const rows = shown.map((e) => {
-    const chips = e.effects.map((label) => `<span class="fx">${esc(label)}</span>`).join("");
+    const actions = (e.changes || []).map((c) => c.op === "add_item" ? `В меню: ${c.name} · ${c.price} ₽` : c.op === "set_price" ? `${c.name}: ${c.price_after} ₽` : `${c.name}: ${c.available_after ? "доступно" : "выключено"}`);
+    const chips = [...e.effects, ...actions, ...((e.proposals || []).length ? ["Есть невыполненные предложения"] : [])].map((label) => `<span class="fx">${esc(label)}</span>`).join("");
     const meta = [e.source === "director" ? "режиссёр" : "", e.until_day > snap.run.day ? `до дня ${e.until_day}` : ""].filter(Boolean).join(" · ");
-    return `<article class="ev from-${e.source}" title="${esc(e.input ? `Вброс: ${e.input}. ` : "")}${esc(e.story || "")}"><header><b>${esc(e.headline)}</b>${meta ? `<span class="meta">${esc(meta)}</span>` : ""}<button type="button" class="end" data-end="${e.id}" title="Завершить событие сейчас" aria-label="Завершить событие">×</button></header>${chips ? `<div class="fxs">${chips}</div>` : ""}${e.story ? `<p>${esc(e.story)}</p>` : ""}</article>`;
+    const key = `event:${e.id}`;
+    const expanded = openEventCards.has(key);
+    return `<article class="ev from-${e.source}${expanded ? " expanded" : ""}" data-event-card="${key}"><header><button type="button" class="ev-toggle" aria-expanded="${expanded}" aria-controls="event-detail-${e.id}"><b>${esc(e.headline)}</b>${meta ? `<span class="meta">${esc(meta)}</span>` : ""}<span class="ev-chevron" aria-hidden="true">⌄</span></button><button type="button" class="end" data-end="${e.id}" title="Завершить событие сейчас" aria-label="Завершить событие">×</button></header>${chips ? `<div class="fxs">${chips}</div>` : ""}${e.story ? `<p>${esc(e.story)}</p>` : ""}<div id="event-detail-${e.id}" class="ev-detail"${expanded ? "" : " hidden"}>${(e.proposals || []).map((p) => `<p><strong>Пока не выполнено:</strong> ${esc(p)}</p>`).join("")}${e.input ? `<p><strong>Вброс:</strong> ${esc(e.input)}</p>` : ""}</div></article>`;
   }).join("") + (hidden > 0 ? `<p class="more" title="${esc(events.slice(0, hidden).map((e) => e.headline).join("; "))}">ещё событий: ${hidden}</p>` : "");
   const wait = thinking ? `<article class="ev wait"><b>${esc(phase)}</b><span class="dots"><i></i><i></i><i></i></span></article>` : "";
   root.innerHTML = district + rows + wait;
@@ -1596,30 +1846,22 @@ function stars(n) {
 }
 
 function renderReviews() {
-  const stats = snap.reviews || { avg: null, count: 0, latest: [] };
-  document.getElementById("rating-val").textContent = stats.avg === null ? "—" : stats.avg.toFixed(1).replace(".", ",");
-  document.getElementById("rating-n").textContent = stats.count ? ` · ${stats.count}` : "";
-  const button = document.getElementById("rating");
-  button.setAttribute("aria-expanded", String(showReviews));
+  const stats = placeData(placeId || "cafe").reviews || { avg: null, count: 0, latest: [] };
   const root = document.getElementById("reviews");
-  if (!showReviews) {
-    root.hidden = true;
-    return;
-  }
-  root.hidden = false;
+  const head = stats.avg === null ? "" : `<p class="pc-rating">★ ${stats.avg.toFixed(1).replace(".", ",")} · ${stats.count}</p>`;
   const list = stats.latest.length
     ? stats.latest.map((row) => `<article class="review" data-pick="${row.id}" data-who="${row.client_id}" tabindex="0" role="button" title="Открыть разговор">
         <header><b>${esc(row.client_name)}</b><span class="stars">${stars(row.liked)}</span></header>
         <p>${esc(row.review)}</p><small>День ${row.day}, ${esc(row.clock)}</small></article>`).join("")
     : `<p class="quiet-note">Отзывов пока нет.</p>`;
-  root.innerHTML = `<div class="drawer-head"><h2>Отзывы <span>${stats.avg === null ? "" : `★ ${stats.avg.toFixed(1).replace(".", ",")}`}</span></h2><button type="button" id="close-reviews">Закрыть</button></div>${list}`;
+  root.innerHTML = head + list;
 }
 
 function renderRibbon() {
   const list = document.getElementById("ribbon-list");
-  const visits = [...(snap.day_visits || [])].reverse();
+  const visits = [...(placeData(placeId || "cafe").day_visits || [])].reverse();
   if (!visits.length) {
-    list.innerHTML = `<li class="quiet-note">${snap.run.day ? "Гостей ещё не было." : "Смена не начата."}</li>`;
+    list.innerHTML = `<li class="quiet-note">${snap.run.day ? "Гостей ещё не было." : "День не начат."}</li>`;
     return;
   }
   const top = list.scrollTop;
@@ -1637,10 +1879,10 @@ function renderDots() {
     root.innerHTML = "";
     return;
   }
-  const span = snap.run.close_min - snap.run.open_min;
+  const span = snap.run.day_end - snap.run.day_start;
   root.innerHTML = (snap.day_visits || []).map((v) => {
     const at = v.start_min ?? clockMinutes(v.clock);
-    const left = (((at - snap.run.open_min) / span) * 100).toFixed(2);
+    const left = (((at - snap.run.day_start) / span) * 100).toFixed(2);
     const title = `${v.clock} ${v.client_name}: ${outcomeText(v)}`;
     return `<button type="button" class="dot-mark ${OUTCOME[v.status] || "ok"}" style="left:${left}%" title="${esc(title)}" data-pick="${v.id}" data-who="${v.client_id}"></button>`;
   }).join("");
@@ -1673,7 +1915,7 @@ function renderDayCard() {
       <div><dt>${refused ? "Без заказа" : "Знакомых"}</dt><dd>${refused || s.returned || 0}</dd></div>
     </dl>
     ${daysChart(run.day)}
-    <p>«Пустить время» или «До закрытия» откроют следующий день.</p>`;
+    <p>«Пустить время» или «До конца суток» откроют следующий день.</p>`;
 }
 
 /* ---------- события: деньги над кассой и звук ---------- */
@@ -1783,22 +2025,6 @@ async function control(action, extra = {}) {
   await rpc("control", { action, ...extra });
 }
 
-document.getElementById("rating").onclick = () => {
-  showReviews = !showReviews;
-  if (showReviews) showNotes = false;
-  if (snap) {
-    renderReviews();
-    renderManager();
-  }
-};
-document.getElementById("notes-btn").onclick = () => {
-  showNotes = !showNotes;
-  if (showNotes) showReviews = false;
-  if (snap) {
-    renderManager();
-    renderReviews();
-  }
-};
 document.getElementById("sound").onclick = () => {
   sfx.set(!sfx.on);
   paintSound();
@@ -1824,16 +2050,11 @@ document.getElementById("director").onsubmit = async (event) => {
   button.disabled = false;
   button.textContent = "Вбросить";
 };
-document.getElementById("step").onclick = () => control("step");
 document.getElementById("day").onclick = () => control("day");
 document.getElementById("auto").onclick = () => control("auto");
 document.getElementById("pause").onclick = () => control("pause");
 document.getElementById("reset").onclick = () => {
   if (confirm("Начать прогон заново? Разговоры этой смены сотрутся.")) control("reset");
-};
-document.getElementById("speed").onclick = (event) => {
-  const btn = event.target.closest("[data-speed]");
-  if (btn) control("speed", { speed: Number(btn.dataset.speed) });
 };
 document.getElementById("agent-filter").onchange = () => { if (snap) render(); };
 document.getElementById("err-only").onchange = () => { if (snap) render(); };
@@ -1883,8 +2104,6 @@ document.body.addEventListener("keydown", (event) => {
   if (event.key === " ") {
     event.preventDefault();
     control(snap.run.status === "running" ? "pause" : "auto");
-  } else if ("1234".includes(event.key) && event.key.length === 1) {
-    control("speed", { speed: [1, 2, 4, 8][Number(event.key) - 1] });
   }
 });
 
@@ -1900,14 +2119,37 @@ document.body.addEventListener("click", (event) => {
     rpc("end_event", { event_id: Number(endBtn.dataset.end) });
     return;
   }
-  if (event.target.closest("#close-notes")) {
-    showNotes = false;
-    renderManager();
+  const eventCard = event.target.closest("[data-event-card]");
+  if (eventCard) {
+    const key = eventCard.dataset.eventCard;
+    if (openEventCards.has(key)) openEventCards.delete(key);
+    else openEventCards.add(key);
+    // Не пересоздаём карточку: сохраняем фокус клавиатуры и прокрутку.
+    const expanded = openEventCards.has(key);
+    eventCard.classList.toggle("expanded", expanded);
+    eventCard.querySelector(".ev-toggle").setAttribute("aria-expanded", String(expanded));
+    eventCard.querySelector(".ev-detail").hidden = !expanded;
     return;
   }
-  if (event.target.closest("#close-reviews")) {
-    showReviews = false;
-    renderReviews();
+  if (event.target.closest("[data-inspect-close]")) {
+    inspected = null;
+    renderInspect();
+    return;
+  }
+  const signBtn = event.target.closest("[data-place]");
+  if (signBtn) {
+    openPlace(signBtn.dataset.place === placeId ? null : signBtn.dataset.place);
+    return;
+  }
+  if (event.target.closest("#close-place")) {
+    openPlace(null);
+    return;
+  }
+  const tabBtn = event.target.closest("[data-tab]");
+  if (tabBtn) {
+    placeTab = tabBtn.dataset.tab;
+    renderPlace();
+    if (snap) renderManager();
     return;
   }
   if (event.target.closest("#close-card")) {

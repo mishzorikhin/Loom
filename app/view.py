@@ -3,16 +3,17 @@ import time
 from datetime import datetime
 
 import app.db as db
-from app.config import CLOSE_MIN, LIKES_WINDOW, OPEN_MIN
-from app.rules import advance_minutes, effect_label, format_clock, popularity
+from app.config import CLOSE_MIN, DAY_END, DAY_START, LIKES_WINDOW, OPEN_MIN
+from app.rules import advance_minutes, effect_label, format_clock, gpu_status, gpu_utilization, popularity
+from app.venues import DC_CAPACITY, VENUES, venue_of
 
 
 def _stats(day: int | None) -> dict:
-    where = ""
-    args: tuple = ()
+    where = "WHERE place_id = ?"
+    args: tuple = (db.current_place(),)
     if day is not None:
-        where = "WHERE day = ?"
-        args = (day,)
+        where += " AND day = ?"
+        args = (db.current_place(), day)
     row = db.one(
         f"""
         SELECT
@@ -47,7 +48,9 @@ def _stats(day: int | None) -> dict:
 
 
 def event_effects(kind: str) -> list[dict]:
-    """Эффекты заданного вида из событий, которые действуют сегодня."""
+    """Эффекты заданного вида из событий, которые действуют сегодня. События и их эффекты касаются кофейни."""
+    if db.current_place() != "cafe":
+        return []
     day = (db.run() or {}).get("day") or 0
     return [fx for event in (db.active_events(day) if day else []) for fx in event["effects"] if fx["type"] == kind]
 
@@ -72,16 +75,16 @@ def _item_stats() -> list[dict]:
     stats = []
     for item in db.items():
         requested = db.one(
-            "SELECT COUNT(*) AS n FROM visits WHERE requested_item_id = ?",
-            (item["id"],),
+            "SELECT COUNT(*) AS n FROM visits WHERE requested_item_id = ? AND place_id = ?",
+            (item["id"], db.current_place()),
         )["n"]
         sold = db.one(
-            "SELECT COUNT(*) AS n FROM visits WHERE status = 'served' AND served_item_id = ?",
-            (item["id"],),
+            "SELECT COUNT(*) AS n FROM visits WHERE status = 'served' AND served_item_id = ? AND place_id = ?",
+            (item["id"], db.current_place()),
         )["n"]
         refused = db.one(
-            "SELECT COUNT(*) AS n FROM visits WHERE status = 'refused' AND requested_item_id = ?",
-            (item["id"],),
+            "SELECT COUNT(*) AS n FROM visits WHERE status = 'refused' AND requested_item_id = ? AND place_id = ?",
+            (item["id"], db.current_place()),
         )["n"]
         stats.append({
             **item, "enabled": bool(item["available"]), "available": bool(item["available"]) and not item["blocked"],
@@ -99,11 +102,12 @@ def _guest_mood(start: int, through_day: int) -> dict:
                SUM(CASE WHEN intent = 'no' THEN 1 ELSE 0 END) AS no,
                SUM(COALESCE(recommend, 0)) AS recommend,
                SUM(CASE WHEN is_return = 1 THEN 1 ELSE 0 END) AS repeat_visits
-        FROM visits WHERE day BETWEEN ? AND ? AND liked IS NOT NULL
+        FROM visits WHERE day BETWEEN ? AND ? AND liked IS NOT NULL AND place_id = ?
         """,
-        (start, through_day),
+        (start, through_day, db.current_place()),
     )
-    fresh = db.one("SELECT COUNT(*) AS n FROM clients WHERE created_day BETWEEN ? AND ?", (start, through_day))["n"]
+    fresh = db.one("SELECT COUNT(*) AS n FROM clients WHERE created_day BETWEEN ? AND ? AND place_id = ?",
+                   (start, through_day, db.current_place()))["n"]
     return {
         "avg_liked": round(row["liked"], 2) if row["liked"] is not None else None,
         "will_return": row["yes"] or 0,
@@ -127,29 +131,29 @@ def week_summary(through_day: int) -> dict:
             COALESCE(SUM(price), 0) AS revenue,
             AVG(rating) AS avg_rating
         FROM visits
-        WHERE day BETWEEN ? AND ? AND status NOT IN ('open', 'waiting')
+        WHERE day BETWEEN ? AND ? AND status NOT IN ('open', 'waiting') AND place_id = ?
         """,
-        (start, through_day),
+        (start, through_day, db.current_place()),
     )[0]
     items = []
     for item in db.items():
         requested = db.one(
-            "SELECT COUNT(*) AS n FROM visits WHERE day BETWEEN ? AND ? AND requested_item_id = ?",
-            (start, through_day, item["id"]),
+            "SELECT COUNT(*) AS n FROM visits WHERE day BETWEEN ? AND ? AND requested_item_id = ? AND place_id = ?",
+            (start, through_day, item["id"], db.current_place()),
         )["n"]
         sold = db.one(
             """
             SELECT COUNT(*) AS n FROM visits
-            WHERE day BETWEEN ? AND ? AND status = 'served' AND served_item_id = ?
+            WHERE day BETWEEN ? AND ? AND status = 'served' AND served_item_id = ? AND place_id = ?
             """,
-            (start, through_day, item["id"]),
+            (start, through_day, item["id"], db.current_place()),
         )["n"]
         refused = db.one(
             """
             SELECT COUNT(*) AS n FROM visits
-            WHERE day BETWEEN ? AND ? AND status = 'refused' AND requested_item_id = ?
+            WHERE day BETWEEN ? AND ? AND status = 'refused' AND requested_item_id = ? AND place_id = ?
             """,
-            (start, through_day, item["id"]),
+            (start, through_day, item["id"], db.current_place()),
         )["n"]
         items.append(
             {
@@ -167,10 +171,10 @@ def week_summary(through_day: int) -> dict:
     for row in db.q(
         """
         SELECT requested_text FROM visits
-        WHERE day BETWEEN ? AND ? AND status = 'refused' AND TRIM(COALESCE(requested_text, '')) != ''
+        WHERE day BETWEEN ? AND ? AND status = 'refused' AND TRIM(COALESCE(requested_text, '')) != '' AND place_id = ?
         ORDER BY id DESC LIMIT 8
         """,
-        (start, through_day),
+        (start, through_day, db.current_place()),
     ):
         text = " ".join(str(row["requested_text"]).split())[:60]
         if text and text not in wishes:
@@ -207,35 +211,16 @@ def _events_view(day: int) -> list[dict]:
     return [
         {
             "id": event["id"], "day": event["day"], "until_day": event["until_day"], "source": event["source"],
-            "headline": event["headline"], "story": event["story"], "input": event["input"],
+            "headline": event["headline"], "story": event["story"], "input": event["input"], "changes": event["changes"], "proposals": event["proposals"],
             "effects": [effect_label(fx, items, names) for fx in event["effects"]],
         }
         for event in db.active_events(day)
     ]
 
 
-def snapshot() -> dict:
-    state = dict(db.run())
-    live = advance_minutes(
-        state.get("clock_min") or OPEN_MIN,
-        state.get("clock_real") or time.time(),
-        time.time(),
-        state.get("speed") or 1,
-        state["status"] == "running",
-        bool(state.get("thinking")),
-    )
-    state["clock_min"] = live
-    state["clock"] = format_clock(live)
-    state["open_min"] = OPEN_MIN
-    state["close_min"] = CLOSE_MIN
-    people = []
-    for client in db.clients():
-        people.append(
-            {
-                **client,
-                "history": db.client_visits(client["id"]),
-            }
-        )
+def _place_payload(state: dict) -> dict:
+    """Всё, что относится к одному заведению (то, на которое указывает `db.at_place`): персонал, визиты дня,
+    прайс или меню, отзывы, записки управляющего, итоги."""
     roster = []
     for person in db.staff():
         served = db.one(
@@ -245,28 +230,101 @@ def snapshot() -> dict:
             """,
             (person["id"], state["day"] or -1),
         )["n"]
-        roster.append({**person, "served_today": served, "role": "бариста"})
-    current = None
-    if state["active_visit_id"]:
-        current = db.visit(state["active_visit_id"])
+        roster.append({**person, "served_today": served, "role": venue_of(_kind()).staff_word})
     day_visits = []
     if state["day"]:
         day_visits = db.q(
             """
             SELECT v.id, v.day, v.seq, v.clock, v.status, v.price, v.is_return, v.rating,
-                   v.client_id, v.staff_id, v.start_min, v.end_min, v.stay_min, v.serve_min, v.mood, v.mood_after, v.staff_mood,
+                   v.client_id, v.staff_id, v.start_min, v.end_min, v.stay_min, v.serve_min, v.mood, v.mood_after, v.staff_mood, v.side,
                    v.requested_text, c.name AS client_name, i.name AS item_name
             FROM visits v
             JOIN clients c ON c.id = v.client_id
             LEFT JOIN items i ON i.id = COALESCE(v.served_item_id, v.requested_item_id)
-            WHERE v.day = ?
+            WHERE v.day = ? AND v.place_id = ?
             ORDER BY v.seq
             """,
-            (state["day"],),
+            (state["day"], db.current_place()),
         )
+    weeks = []
+    for week in db.weeks():
+        weeks.append(
+            {
+                "id": week["id"],
+                "through_day": week["through_day"],
+                "say": week["say"],
+                "summary": json.loads(week["summary_json"]),
+                "changes": json.loads(week["changes_json"]),
+                "notes": json.loads(week["notes_json"]),
+                "created_at": week["created_at"],
+            }
+        )
+    payload = {
+        "staff": roster,
+        "days": db.day_counts(14),
+        "reviews": db.review_stats(),
+        "menu": _item_stats(),
+        "day_visits": day_visits,
+        "summary": {"today": _stats(state["day"] or None) if state["day"] else _stats(-1), "all": _stats(None)},
+        "weeks": weeks,
+    }
+    if _kind() == "datacenter":
+        day = state["day"] or 0
+        util = gpu_utilization(db.load_rows(day), day, DC_CAPACITY)
+        payload["gpu"] = {"util": round(util, 3), "status": gpu_status(util), "capacity": DC_CAPACITY}
+    return payload
+
+
+def _kind() -> str:
+    place = db.place(db.current_place())
+    return place["type"] if place else "cafe"
+
+
+CITY = None  # город, который ведёт движок: `set_city` вызывает приложение при старте
+
+
+def _closed_by_event(place_id: str) -> bool:
+    """Заведение закрыто патчем мира (событие), а не часами работы."""
+    row = CITY.places.get(place_id) if CITY is not None else None
+    return bool(row) and row.get("status") == "closed"
+
+
+def set_city(city) -> None:
+    global CITY
+    CITY = city
+
+
+def snapshot() -> dict:
+    state = dict(db.run())
+    live = advance_minutes(
+        state.get("clock_min") or DAY_START,
+        state.get("clock_real") or time.time(),
+        time.time(),
+        state.get("speed") or 1,
+        state["status"] == "running",
+        bool(state.get("thinking")),
+    )
+    state["clock_min"] = live
+    state["clock"] = format_clock(live)
+    state["day_start"] = DAY_START
+    state["day_end"] = DAY_END
+    state["open_min"] = OPEN_MIN
+    state["close_min"] = CLOSE_MIN
+    people = []
+    for client in db.all_clients():
+        people.append({**client, "history": db.client_visits(client["id"])})
+    cafe = _place_payload(state)
+    place_views = {}
+    for place in db.places():
+        if place["id"] != "cafe" and place["type"] in VENUES:
+            with db.at_place(place["id"]):
+                place_views[place["id"]] = _place_payload(state)
+    current = None
+    if state["active_visit_id"]:
+        current = db.visit(state["active_visit_id"])
     journal = db.q(
         """
-        SELECT v.id, v.day, v.clock, v.status, v.price, v.rating, v.is_return, v.memory_phrase,
+        SELECT v.id, v.day, v.clock, v.status, v.price, v.rating, v.is_return, v.memory_phrase, v.place_id,
                v.requested_text, c.name AS client_name, s.name AS staff_name, i.name AS item_name
         FROM visits v
         JOIN clients c ON c.id = v.client_id
@@ -295,20 +353,7 @@ def snapshot() -> dict:
                 "parsed": bool(call["parsed_json"]),
             }
         )
-    weeks = []
-    for week in db.weeks():
-        weeks.append(
-            {
-                "id": week["id"],
-                "through_day": week["through_day"],
-                "say": week["say"],
-                "summary": json.loads(week["summary_json"]),
-                "changes": json.loads(week["changes_json"]),
-                "notes": json.loads(week["notes_json"]),
-                "created_at": week["created_at"],
-            }
-        )
-    repeat_people = db.one("SELECT COUNT(*) AS n FROM clients WHERE visits >= 2")["n"]
+    repeat_people = db.one("SELECT COUNT(*) AS n FROM clients WHERE visits >= 2 AND place_id = 'cafe'")["n"]
     return {
         "run": state,
         "venue": {
@@ -324,18 +369,24 @@ def snapshot() -> dict:
             "critic_base_url": db.setting("critic_base_url"),
             "critic_model": db.setting("critic_model"),
         },
-        "staff": roster,
-        "days": db.day_counts(14),
+        "places": [
+            {**place, "open": place["open_min"] <= live < place["close_min"] and _closed_by_event(place["id"]) is False}
+            for place in db.places()
+        ],
+        "place_views": place_views,
+        "city": {"roster": CITY.roster(), "frame": CITY.frame()} if CITY is not None else None,
+        "staff": cafe["staff"],
+        "days": cafe["days"],
         "events": _events_view(state["day"]),
         "district": _district_view(state["day"]),
-        "reviews": db.review_stats(),
-        "menu": _item_stats(),
+        "reviews": cafe["reviews"],
+        "menu": cafe["menu"],
         "clients": people,
         "current_visit": current,
-        "day_visits": day_visits,
-        "summary": {"today": _stats(state["day"] or None) if state["day"] else _stats(-1), "all": _stats(None)},
+        "day_visits": cafe["day_visits"],
+        "summary": cafe["summary"],
         "journal": journal,
         "llm_calls": calls,
-        "weeks": weeks,
+        "weeks": cafe["weeks"],
         "server_time": datetime.now().isoformat(timespec="seconds"),
     }

@@ -1,9 +1,12 @@
+import contextvars
 import json
 import sqlite3
 import threading
 from contextlib import contextmanager
 
 from app.config import (
+    CLOSE_MIN,
+    OPEN_MIN,
     DAYS_PER_WEEK,
     DB_PATH,
     LLM_API_KEY,
@@ -12,8 +15,27 @@ from app.config import (
     LLM_TIMEOUT,
 )
 
+from app.venues import DC_MENU, DC_STAFF  # noqa: E402
+
 LOCK = threading.Lock()
 CONN: sqlite3.Connection | None = None
+
+# Заведение, с которым сейчас работает код: меню, персонал, гости, визиты, очередь и записки привязаны к нему.
+# По умолчанию кофейня. Движок на время хода заведения входит в `at_place`, поэтому весь прежний код работает и для других.
+_PLACE: contextvars.ContextVar[str] = contextvars.ContextVar("place", default="cafe")
+
+
+def current_place() -> str:
+    return _PLACE.get()
+
+
+@contextmanager
+def at_place(place_id: str):
+    token = _PLACE.set(place_id)
+    try:
+        yield place_id
+    finally:
+        _PLACE.reset(token)
 
 MENU = [
     ("espresso", "Эспрессо", 150, 2),
@@ -22,6 +44,15 @@ MENU = [
     ("filter", "Фильтр", 180, 3),
     ("cocoa", "Какао", 200, 3),
     ("bun", "Булочка", 120, 1),
+]
+
+# Заведения квартала: id, тип, название, открытие, закрытие (минуты суток), дверь на карте (клетки), заметка.
+# Бизнес-логика (меню, персонал, визиты с разговором) в коде пока только у кофейни; у остальных есть часы работы
+# и посетители из города.
+PLACES = [
+    ("cafe", "cafe", "Кофейня на углу", OPEN_MIN, CLOSE_MIN, -0.7, 5.9, ""),
+    ("neuraldeep", "datacenter", "NeuralDeep", 0, 1440, -4.7, 25.4,
+     "ЦОД и LLM-шлюз через дорогу от кофейни (отсылка к hub.neuraldeep.ru): OpenAI-совместимый API, свои GPU, тарифы и кошелёк."),
 ]
 
 STAFF = [
@@ -49,6 +80,16 @@ def init() -> None:
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS places (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                open_min INTEGER NOT NULL,
+                close_min INTEGER NOT NULL,
+                door_x REAL NOT NULL,
+                door_y REAL NOT NULL,
+                note TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS items (
                 id TEXT PRIMARY KEY,
@@ -213,6 +254,11 @@ def init() -> None:
         )
         _ensure_clock_columns()
         _ensure_visit_columns()
+        _ensure_place_columns()
+        event_columns = {row["name"] for row in CONN.execute("PRAGMA table_info(events)")}
+        for column in ("changes_json", "proposals_json"):
+            if column not in event_columns:
+                CONN.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT NOT NULL DEFAULT '[]'")
         row = CONN.execute("SELECT value FROM settings WHERE key = 'clock_model'").fetchone()
         if row is None or row["value"] != "hour-minute":
             for table in ("lines", "visits", "clients", "llm_calls", "weeks", "arrivals", "events", "district", "pool", "items", "staff", "run_state"):
@@ -239,6 +285,8 @@ def _ensure_clock_columns() -> None:
         CONN.execute("ALTER TABLE run_state ADD COLUMN clock_real REAL NOT NULL DEFAULT 0")
     if "thinking" not in names:
         CONN.execute("ALTER TABLE run_state ADD COLUMN thinking INTEGER NOT NULL DEFAULT 0")
+    CONN.execute("UPDATE run_state SET speed = 2 WHERE speed != 2")
+    CONN.execute("UPDATE run_state SET goal = 'auto' WHERE goal IN ('step', 'idle')")
 
 
 def _ensure_visit_columns() -> None:
@@ -269,6 +317,43 @@ def _ensure_visit_columns() -> None:
         CONN.execute("ALTER TABLE staff ADD COLUMN mood TEXT")
 
 
+def _ensure_place_columns() -> None:
+    """Всё, что принадлежит заведению (меню, персонал, визиты, записки управляющего), помечено `place_id`.
+    Старые строки относятся к кофейне."""
+    for table in ("items", "staff", "visits", "weeks", "arrivals", "clients", "pool"):
+        names = {row["name"] for row in CONN.execute(f"PRAGMA table_info({table})")}
+        if names and "place_id" not in names:
+            CONN.execute(f"ALTER TABLE {table} ADD COLUMN place_id TEXT NOT NULL DEFAULT 'cafe'")
+    visit_cols = {row["name"] for row in CONN.execute("PRAGMA table_info(visits)")}
+    if visit_cols and "side" not in visit_cols:
+        CONN.execute("ALTER TABLE visits ADD COLUMN side INTEGER")
+    stock = {row["name"] for row in CONN.execute("PRAGMA table_info(items)")}
+    if stock:
+        if "load" not in stock:
+            CONN.execute("ALTER TABLE items ADD COLUMN load REAL NOT NULL DEFAULT 0")
+        if "load_days" not in stock:
+            CONN.execute("ALTER TABLE items ADD COLUMN load_days INTEGER NOT NULL DEFAULT 1")
+    _seed_places()
+
+
+def _seed_places() -> None:
+    CONN.execute(f"DELETE FROM places WHERE id NOT IN ({', '.join('?' for _ in PLACES)})", tuple(row[0] for row in PLACES))
+    for row in PLACES:
+        CONN.execute(
+            "INSERT INTO places(id, type, name, open_min, close_min, door_x, door_y, note) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO NOTHING",
+            row,
+        )
+    # Прайс и инженеры ЦОДа: добавляются один раз, в том числе в уже работающую базу.
+    if CONN.execute("SELECT COUNT(*) AS n FROM items WHERE place_id = 'neuraldeep'").fetchone()["n"] == 0:
+        CONN.executemany(
+            "INSERT INTO items(id, name, price, minutes, available, place_id, load, load_days) VALUES(?, ?, ?, ?, 1, 'neuraldeep', ?, ?)",
+            DC_MENU,
+        )
+    if CONN.execute("SELECT COUNT(*) AS n FROM staff WHERE place_id = 'neuraldeep'").fetchone()["n"] == 0:
+        CONN.executemany("INSERT INTO staff(id, name, speed, on_shift, place_id) VALUES(?, ?, ?, 1, 'neuraldeep')", DC_STAFF)
+
+
 def _seed_unlocked() -> None:
     defaults = {
         "llm_base_url": LLM_BASE_URL,
@@ -283,12 +368,13 @@ def _seed_unlocked() -> None:
             "INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO NOTHING",
             (key, value),
         )
-    if CONN.execute("SELECT COUNT(*) AS n FROM items").fetchone()["n"] == 0:
+    _seed_places()
+    if CONN.execute("SELECT COUNT(*) AS n FROM items WHERE place_id = 'cafe'").fetchone()["n"] == 0:
         CONN.executemany(
             "INSERT INTO items(id, name, price, minutes, available) VALUES(?, ?, ?, ?, 1)",
             MENU,
         )
-    if CONN.execute("SELECT COUNT(*) AS n FROM staff").fetchone()["n"] == 0:
+    if CONN.execute("SELECT COUNT(*) AS n FROM staff WHERE place_id = 'cafe'").fetchone()["n"] == 0:
         CONN.executemany(
             "INSERT INTO staff(id, name, speed, on_shift) VALUES(?, ?, ?, 1)",
             STAFF,
@@ -298,14 +384,14 @@ def _seed_unlocked() -> None:
         INSERT INTO run_state(
             id, status, goal, day, day_target, day_done, day_closed,
             pending_manager, speed, phase, active_agent, active_visit_id, message, clock, clock_min, clock_real
-        ) VALUES (1, 'idle', 'idle', 0, 0, 0, 1, 0, 1, '', '', NULL, '', '08:00', 480, 0)
+        ) VALUES (1, 'idle', 'idle', 0, 0, 0, 1, 0, 2, '', '', NULL, '', '00:00', 0, 0)
         """
     )
 
 
 def reset_world() -> None:
     with LOCK:
-        for table in ("lines", "visits", "clients", "llm_calls", "weeks", "arrivals", "events", "district", "pool", "items", "staff", "run_state"):
+        for table in ("lines", "visits", "clients", "llm_calls", "weeks", "arrivals", "events", "district", "pool", "items", "staff", "run_state", "places"):
             CONN.execute(f"DELETE FROM {table}")
         _seed_unlocked()
         CONN.commit()
@@ -380,8 +466,9 @@ def items() -> list[dict]:
         """
         SELECT i.*, CASE WHEN i.out_until IS NOT NULL AND i.out_until >= COALESCE((SELECT day FROM run_state WHERE id = 1), 0)
                          THEN 1 ELSE 0 END AS blocked
-        FROM items i ORDER BY price, name
-        """
+        FROM items i WHERE i.place_id = ? ORDER BY price, name
+        """,
+        (current_place(),),
     )
 
 
@@ -399,6 +486,9 @@ def last_district_traffic(before_day: int) -> float:
 
 
 def district_for(day: int) -> dict | None:
+    """Голос района задаёт спрос только кофейни; у остальных заведений поток по формуле."""
+    if current_place() != "cafe":
+        return None
     row = one("SELECT * FROM district WHERE day = ?", (day,))
     if row:
         row["curve"] = json.loads(row["curve_json"])
@@ -408,32 +498,33 @@ def district_for(day: int) -> dict | None:
 def reset_pool(day: int, guests: list[dict]) -> None:
     """Новая пачка профилей на день: неиспользованные вчерашние пропадают."""
     with tx() as conn:
-        conn.execute("DELETE FROM pool WHERE used = 0")
+        conn.execute("DELETE FROM pool WHERE used = 0 AND place_id = ?", (current_place(),))
         conn.executemany(
-            "INSERT INTO pool(day, name, trait, patience, budget, story) VALUES(?, ?, ?, ?, ?, ?)",
-            [(day, g["name"], g["trait"], g["patience"], g["budget"], g["story"]) for g in guests],
+            "INSERT INTO pool(day, name, trait, patience, budget, story, place_id) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            [(day, g["name"], g["trait"], g["patience"], g["budget"], g["story"], current_place()) for g in guests],
         )
 
 
 def take_newcomer() -> dict | None:
-    row = one("SELECT * FROM pool WHERE used = 0 ORDER BY id LIMIT 1")
+    row = one("SELECT * FROM pool WHERE used = 0 AND place_id = ? ORDER BY id LIMIT 1", (current_place(),))
     if row:
         execute("UPDATE pool SET used = 1 WHERE id = ?", (row["id"],))
     return row
 
 
 def pool_left() -> int:
-    return one("SELECT COUNT(*) AS n FROM pool WHERE used = 0")["n"]
+    return one("SELECT COUNT(*) AS n FROM pool WHERE used = 0 AND place_id = ?", (current_place(),))["n"]
 
 
 def review_stats() -> dict:
-    row = one("SELECT AVG(liked) AS avg, COUNT(liked) AS n FROM visits WHERE liked IS NOT NULL")
+    row = one("SELECT AVG(liked) AS avg, COUNT(liked) AS n FROM visits WHERE liked IS NOT NULL AND place_id = ?", (current_place(),))
     latest = q(
         """
         SELECT v.id, v.day, v.clock, v.liked, v.review, v.client_id, c.name AS client_name FROM visits v
         JOIN clients c ON c.id = v.client_id
-        WHERE v.review IS NOT NULL AND v.review != '' ORDER BY v.id DESC LIMIT 30
-        """
+        WHERE v.review IS NOT NULL AND v.review != '' AND v.place_id = ? ORDER BY v.id DESC LIMIT 30
+        """,
+        (current_place(),),
     )
     return {"avg": round(row["avg"], 2) if row["avg"] is not None else None, "count": row["n"] or 0, "latest": latest}
 
@@ -442,15 +533,23 @@ def block_item(item_id: str, until_day: int) -> None:
     execute("UPDATE items SET out_until = ? WHERE id = ?", (until_day, item_id))
 
 
-def add_event(day: int, until_day: int, source: str, text: str | None, headline: str, story: str, effects: list[dict]) -> int:
+def add_event(day: int, until_day: int, source: str, text: str | None, headline: str, story: str, effects: list[dict], changes: list[dict] | None = None, proposals: list[str] | None = None) -> int:
     with tx() as conn:
         cur = conn.execute(
             """
-            INSERT INTO events(day, until_day, source, input, headline, story, effects_json, created_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+            INSERT INTO events(day, until_day, source, input, headline, story, effects_json, changes_json, proposals_json, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
             """,
-            (day, until_day, source, text, headline, story, json.dumps(effects, ensure_ascii=False)),
+            (day, until_day, source, text, headline, story, json.dumps(effects, ensure_ascii=False), json.dumps(changes or [], ensure_ascii=False), json.dumps(proposals or [], ensure_ascii=False)),
         )
+        for change in changes or []:
+            if change["op"] == "add_item":
+                conn.execute("INSERT INTO items(id,name,price,minutes,available,place_id) VALUES(?,?,?,?,1,'cafe')",
+                             (change["item_id"],change["name"],change["price"],change["minutes"]))
+            elif change["op"] == "set_price":
+                conn.execute("UPDATE items SET price=? WHERE id=?", (change["price_after"],change["item_id"]))
+            elif change["op"] == "set_available":
+                conn.execute("UPDATE items SET available=? WHERE id=?", (int(change["available_after"]),change["item_id"]))
         return cur.lastrowid
 
 
@@ -471,18 +570,36 @@ def active_events(day: int) -> list[dict]:
     rows = q("SELECT * FROM events WHERE day <= ? AND until_day >= ? ORDER BY id", (day, day))
     for row in rows:
         row["effects"] = json.loads(row["effects_json"])
+        row["changes"] = json.loads(row["changes_json"])
+        row["proposals"] = json.loads(row["proposals_json"])
     return rows
 
 
 def recent_events(limit: int = 5) -> list[dict]:
-    return q("SELECT day, source, headline FROM events ORDER BY id DESC LIMIT ?", (limit,))
+    rows = q("SELECT day, source, headline, proposals_json FROM events ORDER BY id DESC LIMIT ?", (limit,))
+    for row in rows:
+        row["proposals"] = json.loads(row.pop("proposals_json"))
+    return rows
+
+
+def places() -> list[dict]:
+    return q("SELECT * FROM places ORDER BY CASE id WHEN 'cafe' THEN 0 ELSE 1 END, id")
+
+
+def place(place_id: str) -> dict | None:
+    return one("SELECT * FROM places WHERE id = ?", (place_id,))
 
 
 def staff() -> list[dict]:
-    return q("SELECT * FROM staff ORDER BY id")
+    return q("SELECT * FROM staff WHERE place_id = ? ORDER BY id", (current_place(),))
 
 
 def clients() -> list[dict]:
+    return q("SELECT * FROM clients WHERE place_id = ? ORDER BY visits DESC, id DESC", (current_place(),))
+
+
+def all_clients() -> list[dict]:
+    """Люди всех заведений: для окна разговоров."""
     return q("SELECT * FROM clients ORDER BY visits DESC, id DESC")
 
 
@@ -490,16 +607,17 @@ def insert_client(name, trait, patience, budget, day, source=None) -> dict:
     with tx() as conn:
         cur = conn.execute(
             """
-            INSERT INTO clients(name, trait, patience, budget, visits, last_rating, memory, preferred_item, created_day, source)
-            VALUES(?, ?, ?, ?, 0, NULL, '', NULL, ?, ?)
+            INSERT INTO clients(name, trait, patience, budget, visits, last_rating, memory, preferred_item, created_day, source, place_id)
+            VALUES(?, ?, ?, ?, 0, NULL, '', NULL, ?, ?, ?)
             """,
-            (name, trait, patience, budget, day, source),
+            (name, trait, patience, budget, day, source, current_place()),
         )
         client_id = cur.lastrowid
     return one("SELECT * FROM clients WHERE id = ?", (client_id,))
 
 
 def insert_visit(**fields) -> int:
+    fields.setdefault("place_id", current_place())
     cols = ", ".join(fields)
     marks = ", ".join("?" for _ in fields)
     with tx() as conn:
@@ -576,6 +694,7 @@ def recent_llm(limit: int = 40) -> list[dict]:
 
 
 def add_week(**fields) -> None:
+    fields.setdefault("place_id", current_place())
     cols = ", ".join(fields)
     marks = ", ".join("?" for _ in fields)
     with tx() as conn:
@@ -583,14 +702,14 @@ def add_week(**fields) -> None:
 
 
 def weeks() -> list[dict]:
-    return q("SELECT * FROM weeks ORDER BY id DESC")
+    return q("SELECT * FROM weeks WHERE place_id = ? ORDER BY id DESC", (current_place(),))
 
 
 def add_arrivals(day: int, minutes: list[int]) -> None:
     with tx() as conn:
         conn.executemany(
-            "INSERT INTO arrivals(day, minute, status, visit_id) VALUES(?, ?, 'scheduled', NULL)",
-            [(day, minute) for minute in minutes],
+            "INSERT INTO arrivals(day, minute, status, visit_id, place_id) VALUES(?, ?, 'scheduled', NULL, ?)",
+            [(day, minute, current_place()) for minute in minutes],
         )
 
 
@@ -598,17 +717,17 @@ def due_arrival(day: int, minute: float) -> dict | None:
     return one(
         """
         SELECT * FROM arrivals
-        WHERE day = ? AND status = 'scheduled' AND minute <= ?
+        WHERE day = ? AND status = 'scheduled' AND minute <= ? AND place_id = ?
         ORDER BY minute, id LIMIT 1
         """,
-        (day, int(minute)),
+        (day, int(minute), current_place()),
     )
 
 
 def next_arrival(day: int) -> dict | None:
     return one(
-        "SELECT * FROM arrivals WHERE day = ? AND status = 'scheduled' ORDER BY minute, id LIMIT 1",
-        (day,),
+        "SELECT * FROM arrivals WHERE day = ? AND status = 'scheduled' AND place_id = ? ORDER BY minute, id LIMIT 1",
+        (day, current_place()),
     )
 
 
@@ -644,7 +763,7 @@ def save_critic(visit_id: int, score: int, issues: list[dict]) -> None:
 
 def recent_critic(limit: int) -> list[list[dict]]:
     out = []
-    for row in q("SELECT critic_json FROM visits WHERE critic_json IS NOT NULL ORDER BY id DESC LIMIT ?", (limit,)):
+    for row in q("SELECT critic_json FROM visits WHERE critic_json IS NOT NULL AND place_id = ? ORDER BY id DESC LIMIT ?", (current_place(), limit)):
         try:
             out.append(json.loads(row["critic_json"]))
         except (TypeError, ValueError):
@@ -653,16 +772,16 @@ def recent_critic(limit: int) -> list[list[dict]]:
 
 
 def recent_likes(limit: int) -> list[int]:
-    return [row["liked"] for row in q("SELECT liked FROM visits WHERE liked IS NOT NULL ORDER BY id DESC LIMIT ?", (limit,))]
+    return [row["liked"] for row in q("SELECT liked FROM visits WHERE liked IS NOT NULL AND place_id = ? ORDER BY id DESC LIMIT ?", (current_place(), limit))]
 
 
 def referral_pool() -> int:
-    return one("SELECT COALESCE(SUM(referrals), 0) AS n FROM clients")["n"]
+    return one("SELECT COALESCE(SUM(referrals), 0) AS n FROM clients WHERE place_id = ?", (current_place(),))["n"]
 
 
 def take_referral() -> str | None:
     """Один совет знакомому расходуется: вернуть имя того, кто посоветовал."""
-    row = one("SELECT id, name FROM clients WHERE referrals > 0 ORDER BY referrals DESC, id DESC LIMIT 1")
+    row = one("SELECT id, name FROM clients WHERE referrals > 0 AND place_id = ? ORDER BY referrals DESC, id DESC LIMIT 1", (current_place(),))
     if row is None:
         return None
     execute("UPDATE clients SET referrals = referrals - 1 WHERE id = ?", (row["id"],))
@@ -671,26 +790,26 @@ def take_referral() -> str | None:
 
 def waiting(day: int) -> list[dict]:
     """Очередь: гости, которые пришли и ещё не дошли до прилавка, в порядке прихода."""
-    return q("SELECT * FROM visits WHERE day = ? AND status = 'waiting' ORDER BY start_min, id", (day,))
+    return q("SELECT * FROM visits WHERE day = ? AND status = 'waiting' AND place_id = ? ORDER BY start_min, id", (day, current_place()))
 
 
 def visited_today(day: int) -> set[int]:
-    return {row["client_id"] for row in q("SELECT client_id FROM visits WHERE day = ?", (day,))}
+    return {row["client_id"] for row in q("SELECT client_id FROM visits WHERE day = ? AND place_id = ?", (day, current_place()))}
 
 
 def day_counts(limit: int = 14) -> list[dict]:
     rows = q(
         """
         SELECT day, COUNT(*) AS visits, COALESCE(SUM(price), 0) AS revenue FROM visits
-        WHERE status NOT IN ('open', 'waiting') GROUP BY day ORDER BY day DESC LIMIT ?
+        WHERE status NOT IN ('open', 'waiting') AND place_id = ? GROUP BY day ORDER BY day DESC LIMIT ?
         """,
-        (limit,),
+        (current_place(), limit),
     )
     return list(reversed(rows))
 
 
 def scheduled_left(day: int) -> int:
-    return one("SELECT COUNT(*) AS n FROM arrivals WHERE day = ? AND status = 'scheduled'", (day,))["n"]
+    return one("SELECT COUNT(*) AS n FROM arrivals WHERE day = ? AND status = 'scheduled' AND place_id = ?", (day, current_place()))["n"]
 
 
 def set_arrival(arrival_id: int, **fields) -> None:
@@ -717,9 +836,21 @@ def client_visits(client_id: int) -> list[dict]:
 def insert_item(item_id: str, name: str, price: int, minutes: int) -> None:
     with tx() as conn:
         conn.execute(
-            "INSERT INTO items(id, name, price, minutes, available) VALUES(?, ?, ?, ?, 1)",
-            (item_id, name, price, minutes),
+            "INSERT INTO items(id, name, price, minutes, available, place_id, load, load_days) VALUES(?, ?, ?, ?, 1, ?, ?, ?)",
+            (item_id, name, price, minutes, current_place(), 0.1 if current_place() != "cafe" else 0, 5 if current_place() != "cafe" else 1),
         )
+
+
+def load_rows(day: int, span: int = 31) -> list[dict]:
+    """Оформленные услуги заведения за последний месяц с их нагрузкой на GPU (для ЦОДа)."""
+    return q(
+        """
+        SELECT v.day, i.load AS load, i.load_days AS days FROM visits v
+        JOIN items i ON i.id = v.served_item_id
+        WHERE v.place_id = ? AND v.status = 'served' AND v.day > ?
+        """,
+        (current_place(), day - span),
+    )
 
 
 def save_item(item_id: str, price: int, available: int) -> None:

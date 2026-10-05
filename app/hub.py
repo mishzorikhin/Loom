@@ -86,6 +86,13 @@ class Hub:
         except Exception:
             self.disconnect(websocket)
 
+    async def broadcast_frame(self, frame: dict) -> None:
+        """Кадр города: только позиции людей и машин. Снимок не пересобирается."""
+        if not self.clients:
+            return
+        raw = json.dumps({"type": "city", "d": frame}, ensure_ascii=False, separators=(",", ":"))
+        await asyncio.gather(*(self._send(client, raw) for client in list(self.clients)))
+
     async def reply(self, websocket: WebSocket, ident, ok: bool, **fields) -> None:
         await self._send(websocket, json.dumps({"type": "reply", "id": ident, "ok": ok, **fields}, ensure_ascii=False, default=str))
 

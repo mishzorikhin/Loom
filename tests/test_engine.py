@@ -36,6 +36,8 @@ class FakeLLM:
             return self.script[agent]
         if agent in ("narrator", "director"):
             return {"headline": "", "story": "", "effects": []}
+        if agent == "world":
+            return {"say": "Без изменений", "changes": [], "proposals": []}
         if agent == "district":
             return {"traffic": 1.0, "newcomers": 0.3, "curve": [1, 1, 1, 1, 1, 1], "why": "", "buzz": ""}
         if agent == "demographer":
@@ -66,6 +68,82 @@ def run_async(coro):
 
 
 class EngineTest(unittest.TestCase):
+    def test_story_materializes_chocolate_before_next_visit(self):
+        engine, llm = fresh()
+        engine._open_day()
+        llm.script["narrator"] = {"headline": "Новый рецепт", "story": "Марк добавил горячий шоколад с корицей.", "effects": []}
+        llm.script["world"] = {"say": "Новый напиток", "changes": [
+            {"op": "add_item", "name": "Горячий шоколад с корицей", "price": 250, "minutes": 4}], "proposals": []}
+        run_async(engine._story())
+        item = next(row for row in db.items() if row["name"] == "Горячий шоколад с корицей")
+        self.assertTrue(item["available"])
+        self.assertIn(item["name"], menu_block())
+        event = snapshot()["events"][-1]
+        self.assertEqual(event["changes"][0]["item_id"], item["id"])
+        self.assertIn("world", llm.calls)
+        engine.end_event(event["id"])
+        self.assertIn(item["id"], engine_mod.catalog())
+
+    def test_event_price_availability_and_duplicate_survive_reconnect(self):
+        engine, _ = fresh()
+        engine._open_day()
+        event = engine._apply_event(1, {"headline": "Обновление", "story": "Меню меняется", "effects": [], "changes": [
+            {"op": "set_price", "item_id": "espresso", "price": 270},
+            {"op": "set_available", "item_id": "espresso", "available": False},
+            {"op": "add_item", "name": "Эспрессо", "price": 270, "minutes": 2}]}, "director", "обновить")
+        self.assertEqual(len(event["changes"]), 2)
+        self.assertTrue(event["proposals"])
+        db.connect(Path(os.environ["SIM_DB"]))
+        item = engine_mod.catalog()["espresso"]
+        self.assertEqual(item["price"], 270)
+        self.assertFalse(item["available"])
+        self.assertEqual(db.active_events(1)[-1]["changes"], event["changes"])
+
+    def test_event_actions_are_free_of_weekly_counts(self):
+        engine, _ = fresh()
+        engine._open_day()
+        changes = [{"op": "add_item", "name": f"Напиток {n}", "price": 200, "minutes": 2} for n in range(6)]
+        event = engine._apply_event(1, {"headline": "Дегустация", "story": "Новые напитки", "effects": [], "changes": changes}, "director", "дегустация")
+        self.assertEqual(len(event["changes"]), 6)
+        self.assertGreater(len(db.items()), 10)
+        self.assertEqual(event["proposals"], [])
+
+    def test_unsupported_and_rejected_event_actions_are_proposals(self):
+        engine, llm = fresh()
+        engine._open_day()
+        llm.script["director"] = {"headline": "Расширение", "story": "Наняли повара и добавили чай.", "effects": []}
+        llm.script["world"] = {"say": "План", "changes": [
+            {"op": "hire", "item_id": "cook"},
+            {"op": "add_item", "name": "Чай", "price": -1, "minutes": 2}], "proposals": ["Нанять повара: найм ещё не поддержан"]}
+        event = run_async(engine.direct("Нанять повара и добавить чай"))
+        self.assertEqual(event["changes"], [])
+        self.assertEqual(len(event["proposals"]), 3)
+        self.assertNotIn("Наняли", engine._event_note())
+        self.assertTrue(snapshot()["events"][-1]["proposals"])
+
+    def test_world_failure_marks_event_unverified(self):
+        engine, llm = fresh()
+        engine._open_day()
+        llm.script["narrator"] = {"headline": "Рецепт", "story": "Добавили шоколад", "effects": []}
+        llm.fail, llm.fail_with = "world", TransportError("Нет связи")
+        run_async(engine._story())
+        event = db.active_events(1)[-1]
+        self.assertTrue(event["proposals"])
+        self.assertEqual(event["changes"], [])
+        self.assertEqual(engine._event_note(), "")
+        self.assertNotEqual(db.run()["status"], "error")
+
+    def test_event_menu_and_event_record_roll_back_together(self):
+        engine, _ = fresh()
+        engine._open_day()
+        count = len(db.items())
+        with self.assertRaises(Exception):
+            db.add_event(1,1,"director",None,"Тест","",[],[
+                {"op":"add_item","item_id":"unique-test","name":"Чай","price":200,"minutes":2},
+                {"op":"add_item","item_id":"espresso","name":"Кофе","price":200,"minutes":2}])
+        self.assertEqual(len(db.items()), count)
+        self.assertEqual(db.active_events(1), [])
+
     def test_visit_serves_and_writes_check(self):
         engine, _ = fresh()
         engine._open_day()
@@ -256,7 +334,7 @@ class EngineTest(unittest.TestCase):
             {"type": "item_out", "target": "latte", "amount": 0, "days": 1}]}, "narrator", None)
         latte = next(item for item in db.items() if item["id"] == "latte")
         self.assertEqual((latte["available"], latte["blocked"]), (1, 1))
-        self.assertIn("latte: Латте, 240 ₽, 4 мин, нет", menu_block())
+        self.assertIn("Латте: 240 ₽, 4 мин, нет", menu_block())
         self.assertEqual(next(m for m in snapshot()["menu"] if m["id"] == "latte")["available"], False)
         db.set_run(day=2)
         self.assertEqual(next(item for item in db.items() if item["id"] == "latte")["blocked"], 0)
@@ -384,7 +462,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(event["headline"], "Санинспекция")
         stored = db.active_events(1)[0]
         self.assertEqual((stored["source"], stored["input"]), ("director", "приехала санинспекция"))
-        self.assertEqual(llm.calls[-1], "director")
+        self.assertEqual(llm.calls[-2:], ["director", "world"])
         self.assertEqual(db.run()["phase"], "")
 
     def test_director_without_model_still_records_the_words(self):
@@ -430,7 +508,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual((voice["traffic"], voice["newcomers"]), (1.3, 0.5))
         self.assertAlmostEqual(current_popularity(), 1.3, places=2)
         self.assertEqual(db.pool_left(), 2)
-        self.assertEqual(len(db.q("SELECT * FROM arrivals WHERE status = 'scheduled'")), 1)
+        self.assertEqual(len(db.q("SELECT * FROM arrivals WHERE status = 'scheduled' AND place_id = 'cafe'")), 1)
         view = snapshot()
         self.assertEqual(view["district"]["buzz"], "Хвалят эспрессо.")
         self.assertTrue(log.read(5, ev="district.new"))
@@ -456,7 +534,7 @@ class EngineTest(unittest.TestCase):
         self.assertAlmostEqual(current_popularity(), popularity_hint(), places=2)
         self.assertEqual(db.run()["status"], "running")
         self.assertTrue(log.read(5, ev="district.fail"))
-        self.assertEqual(len(db.q("SELECT * FROM arrivals WHERE status = 'scheduled'")), 1)
+        self.assertEqual(len(db.q("SELECT * FROM arrivals WHERE status = 'scheduled' AND place_id = 'cafe'")), 1)
 
     def test_review_is_stored_and_rated(self):
         engine, llm = fresh()
@@ -531,7 +609,7 @@ class EngineTest(unittest.TestCase):
     def test_day_does_not_close_while_someone_waits(self):
         engine, llm = fresh()
         self._crowd(engine, (1190,))
-        db.set_run(clock_min=1205.0, clock_real=0)
+        db.set_run(clock_min=1441.0, clock_real=0)
         self.assertNotEqual(run_async(engine._tick()), "day_complete")
         self.assertEqual(db.waiting(1), [])
         self.assertEqual(run_async(engine._tick()), "day_complete")
@@ -584,10 +662,10 @@ class EngineTest(unittest.TestCase):
     def test_arrivals_are_a_stream_not_a_schedule(self):
         engine, _ = fresh()
         engine._open_day()
-        self.assertEqual(len(db.q("SELECT * FROM arrivals WHERE status = 'scheduled'")), 1)
+        self.assertEqual(len(db.q("SELECT * FROM arrivals WHERE status = 'scheduled' AND place_id = 'cafe'")), 1)
         run_async(engine._visit(db.next_arrival(1)))
         run_async(engine._visit(db.next_arrival(1)))
-        pending = db.q("SELECT * FROM arrivals WHERE status = 'scheduled'")
+        pending = db.q("SELECT * FROM arrivals WHERE status = 'scheduled' AND place_id = 'cafe'")
         self.assertEqual(len(pending), 1)
         self.assertEqual(db.run()["day_target"], 0)
         self.assertGreater(len(log.read(30, ev="arrival.plan")), 2)
@@ -792,11 +870,15 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(db.run()["status"], "idle")
         self.assertEqual(db.run()["day_done"], 1)
 
-    def test_step_with_no_arrivals_jumps_to_close(self):
+    def test_day_closes_at_midnight_not_at_closing_time(self):
         engine, _ = fresh()
         engine._open_day()
+        self.assertEqual(db.run()["clock_min"], 0)
         db.execute("UPDATE arrivals SET status = 'done'")
-        db.set_run(goal="step", status="running")
+        db.set_run(goal="auto", status="paused", clock_min=1250.0, clock_real=0)
+        self.assertEqual(run_async(engine._tick()), "wait")
+        self.assertEqual(db.run()["day_closed"], 0)
+        db.set_run(clock_min=1441.0)
         self.assertEqual(run_async(engine._tick()), "day_complete")
         self.assertEqual(db.run()["day_closed"], 1)
 
@@ -826,7 +908,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(run_async(engine._close_day()), "day_complete")
         added = next(i for i in db.items() if i["name"] == "Раф")
         self.assertEqual((added["price"], added["minutes"], added["available"]), (260, 5, 1))
-        self.assertIn("Раф, 260 ₽, 5 мин, есть", menu_block())
+        self.assertIn("Раф: 260 ₽, 5 мин, есть", menu_block())
         self.assertEqual(next(i for i in db.items() if i["id"] == "cocoa")["available"], 0)
         ops = [change["op"] for change in json.loads(db.weeks()[0]["changes_json"])]
         self.assertEqual(ops, ["add_item", "set_available"])

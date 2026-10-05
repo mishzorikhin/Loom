@@ -134,6 +134,49 @@ def _traffic() -> dict:
     }
 
 
+def _places(day: int) -> dict:
+    """Все заведения: итог дня, очередь, рейтинг и для ЦОДа нагрузка на GPU."""
+    from app.engine import venue_ids
+    from app.rules import gpu_status, gpu_utilization
+    from app.venues import DC_CAPACITY
+    out = {}
+    for place_id in venue_ids():
+        with db.at_place(place_id):
+            row = {"today": _stats(day) if day else {}, "waiting": len(db.waiting(day)) if day else 0,
+                   "rating": db.review_stats()["avg"], "popularity": round(current_popularity(), 2)}
+            place = db.place(place_id)
+            if place and place["type"] == "datacenter":
+                util = gpu_utilization(db.load_rows(day), day, DC_CAPACITY) if day else 0.0
+                row["gpu"] = {"util": round(util, 3), "status": gpu_status(util)}
+            out[place_id] = row
+    return out
+
+
+def _city(events: list[dict]) -> dict | None:
+    """Город: сколько людей и машин на улице, парковка, объекты от событий, застрявшие и недошедшие."""
+    from app import view
+    city = view.CITY
+    if city is None:
+        return None
+    on_street = [p for p in city.peds.values() if p.state != "inside"]
+    return {
+        "time": f"{int(city.minute // 60):02d}:{int(city.minute % 60):02d}",
+        "people_on_street": len(on_street),
+        "guests_on_the_way": sum(1 for p in on_street if p.client_id),
+        "waiting_to_cross": sum(1 for p in on_street if p.state == "wait" and p.route),
+        "stuck": sum(1 for p in on_street if p.state == "wait" and not p.route),
+        "cars": len(city.cars),
+        "parked": sum(1 for c in city.cars.values() if c.state == "parked"),
+        "free_slots": sum(1 for slot in city.slots if slot is None),
+        "objects": [f"{e.kind} ({e.x:.0f}, {e.y:.0f}) r={e.r:.1f} блок={e.blocks} вред={e.hazard}" for e in city.ents.values()],
+        "inside": {place: list(names.values()) for place, names in city.inside.items() if names},
+        "chats": sum(1 for row in events if row.get("ev") == "city.chat"),
+        "gave_up": sum(1 for row in events if row.get("ev") == "city.gave_up"),
+        "no_parking": sum(1 for row in events if row.get("ev") == "city.no_parking"),
+        "crowd_calls": sum(1 for row in events if row.get("ev") == "crowd.decide"),
+    }
+
+
 def digest(llm_health: dict | None = None) -> dict:
     state = db.run() or {}
     timeout = float(db.setting("llm_timeout") or 60)
@@ -162,6 +205,10 @@ def digest(llm_health: dict | None = None) -> dict:
         flags.append(f"критик нашёл серьёзные ошибки в диалогах: {critic['high']} за последние {critic['reviewed']} визитов ({critic['issues']})")
 
     day = state.get("day") or 0
+    active_events = db.active_events(day) if day else []
+    proposals = [proposal for event in active_events for proposal in event["proposals"]]
+    if proposals:
+        flags.append(f"невыполненные предложения событий: {len(proposals)}")
     today = _stats(day) if day else {}
     failed = db.q("SELECT id, clock, outcome_note FROM visits WHERE day = ? AND status = 'failed'", (day,)) if day else []
     if failed:
@@ -169,6 +216,11 @@ def digest(llm_health: dict | None = None) -> dict:
     fallbacks = [row for row in events if row.get("ev") == "dialog.fallback"]
     if fallbacks:
         flags.append(f"запасные реплики кода за журнал: {len(fallbacks)}")
+    city = _city(events)
+    if city and city["gave_up"]:
+        flags.append(f"гости не дошли до двери (путь закрыт или опасен): {city['gave_up']} за журнал")
+    if city and city["stuck"] >= 4:
+        flags.append(f"на улице стоят {city['stuck']} человек, которым закрыт путь")
     recent_client = [row for row in clients if (_age(row) or 1e9) < 600]
     if recent_client:
         flags.append(f"ошибки страницы за 10 минут: {len(recent_client)}")
@@ -185,10 +237,12 @@ def digest(llm_health: dict | None = None) -> dict:
             "status", "goal", "day", "clock", "speed", "phase", "day_done", "day_closed", "message",
         )},
         "traffic": _traffic(),
+        "places": _places(state.get("day") or 0),
+        "city": city,
         "moods": _moods(),
         "critic": critic,
         "district": _district_line(state.get("day") or 0),
-        "events": [f"{e['headline']} ({e['source']}, до дня {e['until_day']}): {e['effects']}" for e in db.active_events(state.get("day") or 0)] if state.get("day") else [],
+        "events": [f"{e['headline']} ({e['source']}, до дня {e['until_day']}): эффекты {e['effects']}; действия {e['changes']}; предложения {e['proposals']}" for e in active_events],
         "llm": {"health": llm_health, "model": db.setting("llm_model"), "timeout_s": timeout, "agents": llm},
         "today": today,
         "failed_visits": failed,

@@ -118,12 +118,16 @@ INTENT_WEIGHT = {"yes": 1.0, "maybe": 0.45, "no": 0.05}
 INTENTS = ("yes", "maybe", "no")
 
 
-def day_curve(minute: float) -> float:
-    weight = DAY_CURVE[0][1]
-    for start, value in DAY_CURVE:
+def _hour_weight(minute: float, table: tuple) -> float:
+    weight = table[0][1]
+    for start, value in table:
         if minute / 60 >= start:
             weight = value
     return weight
+
+
+def day_curve(minute: float) -> float:
+    return _hour_weight(minute, DAY_CURVE)
 
 
 # Части дня, на которые районный голос раскладывает поток: границы по часам.
@@ -139,10 +143,12 @@ def part_curve(minute: float, curve: list[float]) -> float:
     return curve[-1] if hour >= DAYPARTS[-1][0] else curve[0]
 
 
-def arrival_gap(minute: float, popularity: float, roll: float, curve: list[float] | None = None) -> float:
+def arrival_gap(minute: float, popularity: float, roll: float, curve: list[float] | None = None,
+                base: float = BASE_PER_HOUR, table: tuple | None = None) -> float:
     """Через сколько минут после `minute` придёт следующий гость. `roll` — случайное число от 0 до 1.
-    Без кривой от районного голоса берётся обычная суточная."""
-    rate = BASE_PER_HOUR / 60 * max(0.05, popularity) * (part_curve(minute, curve) if curve else day_curve(minute))
+    Без кривой от районного голоса берётся суточная кривая заведения (`table`, по умолчанию кофейни)."""
+    weight = part_curve(minute, curve) if curve else _hour_weight(minute, table or DAY_CURVE)
+    rate = base / 60 * max(0.05, popularity) * weight
     return max(MIN_GAP, -math.log(max(1e-9, 1 - min(roll, 0.999999))) / rate)
 
 
@@ -235,15 +241,17 @@ def fallback_verdict(status: str, rating: int | None) -> dict:
 _NAME = re.compile(r"^[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9 \-]*$")
 
 
-def _new_item(items: dict[str, dict], change: dict, already: bool) -> tuple[dict | None, str]:
+def _new_item(items: dict[str, dict], change: dict, already: bool, world: bool = False, prefix: str = "new",
+              price_max: int = PRICE_MAX) -> tuple[dict | None, str]:
     """Проверить новую позицию. Вернёт запись правки или причину отказа."""
     name = " ".join(str(change.get("name") or "").split())
     if already:
         return None, f"{name or 'Позиция'}: за неделю добавляется одна новая позиция, остальные пропущены."
-    if len(items) >= MAX_ITEMS:
+    if not world and len(items) >= MAX_ITEMS:
         return None, f"{name or 'Позиция'}: в меню уже {MAX_ITEMS} позиций, новая не добавлена."
-    if len(name) < 2 or len(name) > ITEM_NAME_MAX or not _NAME.match(name):
-        return None, f"Новая позиция «{name[:30]}»: название должно быть от 2 до {ITEM_NAME_MAX} знаков, буквы и цифры."
+    name_max = 80 if world else ITEM_NAME_MAX
+    if len(name) < 2 or len(name) > name_max or not _NAME.match(name):
+        return None, f"Новая позиция «{name[:30]}»: название должно быть от 2 до {name_max} знаков, буквы и цифры."
     if any(str(item["name"]).casefold() == name.casefold() for item in items.values()):
         return None, f"{name}: такая позиция уже есть."
     try:
@@ -251,27 +259,31 @@ def _new_item(items: dict[str, dict], change: dict, already: bool) -> tuple[dict
         minutes = int(change.get("minutes"))
     except (TypeError, ValueError):
         return None, f"{name}: цена или минуты не числа, позиция не добавлена."
-    if price < PRICE_MIN or price > PRICE_MAX:
-        return None, f"{name}: цена {price} вне {PRICE_MIN}–{PRICE_MAX}, позиция не добавлена."
+    if price < PRICE_MIN or price > price_max:
+        return None, f"{name}: цена {price} вне {PRICE_MIN}–{price_max}, позиция не добавлена."
     if minutes < ITEM_MINUTES_MIN or minutes > ITEM_MINUTES_MAX:
         return None, f"{name}: {minutes} мин вне {ITEM_MINUTES_MIN}–{ITEM_MINUTES_MAX}, позиция не добавлена."
     number = 1
-    while f"new{number}" in items:
+    while f"{prefix}{number}" in items:
         number += 1
-    item_id = f"new{number}"
+    item_id = f"{prefix}{number}"
     return {"op": "add_item", "item_id": item_id, "name": name, "price": price, "minutes": minutes}, ""
 
 
-def apply_changes(items: dict[str, dict], changes: list[dict]) -> tuple[list[dict], list[str]]:
+def apply_changes(items: dict[str, dict], changes: list[dict], *, world: bool = False, prefix: str = "new",
+                  price_max: int = PRICE_MAX) -> tuple[list[dict], list[str]]:
     applied: list[dict] = []
     notes: list[str] = []
-    if len(changes) > MAX_EDITS:
+    if not world and len(changes) > MAX_EDITS:
         notes.append(f"Лишние правки отброшены, оставлены {MAX_EDITS} первых.")
     added = False
-    for change in changes[:MAX_EDITS]:
+    for change in (changes if world else changes[:MAX_EDITS]):
+        if not isinstance(change, dict):
+            notes.append("Действие не является объектом и не применено.")
+            continue
         op = change.get("op")
         if op == "add_item":
-            entry, note = _new_item(items, change, added)
+            entry, note = _new_item(items, change, added and not world, world, prefix, price_max)
             if entry is None:
                 notes.append(note)
                 continue
@@ -285,7 +297,7 @@ def apply_changes(items: dict[str, dict], changes: list[dict]) -> tuple[list[dic
         item_id = str(change.get("item_id") or "")
         item = items.get(item_id)
         if item is None or op not in ("set_price", "set_available"):
-            notes.append(f"Правка не применена: неизвестная позиция или действие ({item_id or 'пусто'}).")
+            notes.append(f"Правка не применена: неизвестная позиция или действие ({op or 'пусто'}: {item_id or 'пусто'}).")
             continue
         if op == "set_price":
             try:
@@ -293,8 +305,8 @@ def apply_changes(items: dict[str, dict], changes: list[dict]) -> tuple[list[dic
             except (TypeError, ValueError):
                 notes.append(f"{item['name']}: цена не число, правка пропущена.")
                 continue
-            if price < PRICE_MIN or price > PRICE_MAX:
-                notes.append(f"{item['name']}: цена {price} вне {PRICE_MIN}–{PRICE_MAX}, правка пропущена.")
+            if price < PRICE_MIN or price > price_max:
+                notes.append(f"{item['name']}: цена {price} вне {PRICE_MIN}–{price_max}, правка пропущена.")
                 continue
             previous = item["price"]
             item["price"] = price
@@ -551,7 +563,7 @@ def clean_district(data: dict, previous: float = 1.0) -> dict:
     }
 
 
-def clean_newcomers(data: dict, taken: set[str], limit: int = 8) -> list[dict]:
+def clean_newcomers(data: dict, taken: set[str], limit: int = 8, traits: tuple = TRAITS, budgets: tuple = BUDGETS) -> list[dict]:
     """Профили новых гостей от демографа приводятся к границам: имя без повтора, характер и бюджет из списков."""
     out: list[dict] = []
     used = {name.casefold() for name in taken}
@@ -566,7 +578,7 @@ def clean_newcomers(data: dict, taken: set[str], limit: int = 8) -> list[dict]:
             name = f"{base} {number}"
             number += 1
         used.add(name.casefold())
-        trait = row.get("trait") if row.get("trait") in TRAITS else TRAITS[len(out) % len(TRAITS)]
+        trait = row.get("trait") if row.get("trait") in traits else traits[len(out) % len(traits)]
         try:
             patience = max(1, min(5, int(row.get("patience"))))
         except (TypeError, ValueError):
@@ -577,7 +589,7 @@ def clean_newcomers(data: dict, taken: set[str], limit: int = 8) -> list[dict]:
             wanted = 250
         out.append({
             "name": name, "trait": trait, "patience": patience,
-            "budget": min(BUDGETS, key=lambda value: abs(value - wanted)),
+            "budget": min(budgets, key=lambda value: abs(value - wanted)),
             "story": " ".join(str(row.get("story") or "").split())[:160],
         })
     return out
@@ -585,3 +597,24 @@ def clean_newcomers(data: dict, taken: set[str], limit: int = 8) -> list[dict]:
 
 def clean_review(text) -> str:
     return " ".join(str(text or "").split())[:140]
+
+
+# ---------- нагрузка ЦОДа ----------
+
+GPU_BUSY = 0.85   # выше — высокая нагрузка, инженеры предупреждают
+GPU_SLOW = 0.9    # выше — деградация: обслуживание дольше, оценка визита ниже
+GPU_FULL = 1.0    # от этого безлимит больше не оформляется
+
+
+def gpu_utilization(rows: list[dict], day: int, capacity: float) -> float:
+    """Нагрузка на GPU: сумма нагрузок оформленных услуг, срок которых ещё идёт, делённая на ёмкость парка."""
+    total = sum(float(row["load"] or 0) for row in rows if day - int(row["day"]) < int(row["days"] or 1))
+    return total / capacity if capacity > 0 else 0.0
+
+
+def gpu_status(util: float) -> str:
+    if util >= GPU_SLOW:
+        return "деградация"
+    if util >= GPU_BUSY:
+        return "высокая нагрузка"
+    return "штатно"

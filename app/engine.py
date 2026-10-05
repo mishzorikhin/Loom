@@ -9,35 +9,34 @@ from datetime import datetime
 
 import app.db as db
 from app import log
-from app.config import BASE_PER_HOUR, CLOSE_MIN, MAX_VISITS_DAY, OPEN_MIN, REFERRAL_CHANCE
+from app.config import DAY_END, DAY_START, REFERRAL_CHANCE
 from app.llm import LLM, SchemaError, TransportError, load_system
 from app.rules import (
     DEFAULT_MOOD, ECHO_LIMIT, MOODS, active_hints, clean_critic, advance_minutes, after_visit_mood, apply_changes, arrival_gap, arrival_mood,
     choose_arrival, clean_verdict, come_day_for, echo_ratio, effective_patience, fallback_choice, fallback_close,
     fallback_verdict, format_clock, mood_value, pick_mood, rating_for, shift_mood, stay_minutes, wait_shift,
     QUEUE_CHECK_EVERY, TRAITS, calendar, clean_district, clean_event, clean_newcomers, effect_label,
+    GPU_BUSY, GPU_FULL, GPU_SLOW, gpu_status, gpu_utilization,
 )
 from app.view import _stats as day_stats
 from app.view import current_popularity, event_effects, popularity_hint, week_summary
+from app.venues import DC_CAPACITY, Venue, venue_of
+from app.city import HOMES
 
-NAMES = [
-    "Ника", "Олег", "Марина", "Тимур", "Света", "Павел", "Кира", "Денис",
-    "Алина", "Глеб", "Настя", "Илья", "Полина", "Рома", "Вера", "Артём",
-    "Лена", "Катя", "Юра", "Соня",
-]
+HOME_IDS = sorted(HOMES)
+CITY_FOLK = 14  # постоянные жители города без записи гостя
 
-VOICES = {
-    "anya": "Манера: коротко и по делу, без историй.",
-    "mark": "Манера: спокойно, можно одну бытовую фразу, без выдуманных историй.",
-}
+def venue_now() -> Venue:
+    """Тип заведения, с которым сейчас работает код (см. `db.at_place`)."""
+    row = db.place(db.current_place())
+    return venue_of(row["type"] if row else None)
 
-TRAIT_SAY = {
-    "говорит коротко и спешит": "Скажи коротко: ты спешишь.",
-    "любит уточнить и поболтать": "Кроме заказа можно одна живая фраза. Характер вслух не пересказывай.",
-    "бережёт деньги и просит проще": "Проси что попроще. Цифру бюджета не говори.",
-    "сомневается между двумя позициями": "Назови две позиции из меню и попроси совета, что взять. item_id пустой.",
-    "спокоен и не торопит": "Говори спокойно, без спешки.",
-}
+
+def venue_ids() -> list[str]:
+    """Заведения с визитами и разговорами: те, для которых есть тип в `venues`."""
+    from app.venues import VENUES
+    return [row["id"] for row in db.places() if row["type"] in VENUES]
+
 
 _OLD_TRACE = re.compile(r"^(?P<label>.*), (?P<outcome>обслужен|отказ), оценка (?P<rating>\d+)$")
 
@@ -51,7 +50,7 @@ def menu_block() -> str:
     lines = []
     for item in db.items():
         state = "есть" if usable(item) else "нет"
-        lines.append(f"- {item['id']}: {item['name']}, {item['price']} ₽, {item['minutes']} мин, {state}")
+        lines.append(f"- {item['name']}: {item['price']} ₽, {item['minutes']} мин, {state}")
     return "\n".join(lines)
 
 
@@ -60,10 +59,24 @@ def catalog() -> dict:
 
 
 def clean_item_id(item_id: str | None, items: dict | None = None) -> str:
-    """id вне меню не попадает в следующий ход: модель иногда пишет в поле обрывок JSON."""
-    found = (items if items is not None else catalog())
-    token = str(item_id or "").strip()
-    return token if token in found else ""
+    """Позиция из ответа модели. Модель видит в меню только названия и пишет в поле название; код находит позицию
+    по названию (точно или по вхождению) и отдаёт её id. Свой id тоже принимается. Всё остальное, в том числе
+    обрывок JSON, — пустая строка."""
+    found = items if items is not None else catalog()
+    token = " ".join(str(item_id or "").split())
+    if token in found:
+        return token
+    wanted = token.casefold().strip(" «»\".")
+    if len(wanted) < 3:
+        return ""
+    for item in found.values():
+        if str(item["name"]).casefold() == wanted:
+            return item["id"]
+    for item in found.values():
+        name = str(item["name"]).casefold()
+        if name in wanted or (len(wanted) >= 4 and wanted in name):
+            return item["id"]
+    return ""
 
 
 def plain_memory(text: str) -> str:
@@ -129,7 +142,7 @@ def talk_lines(visit_id: int) -> str:
 
 
 class Engine:
-    def __init__(self, llm: LLM, notify):
+    def __init__(self, llm: LLM, notify, city=None):
         self.llm = llm
         self.notify = notify
         self.task: asyncio.Task | None = None
@@ -138,12 +151,19 @@ class Engine:
         seed = os.environ.get("SIM_SEED")
         self.rng = random.Random(int(seed)) if seed else random.Random()
         self._think_depth = 0
+        self._turn = 0
+        self.city = city
+        self.mind = None
+        self._trips: dict[int, dict] = {}
+        self._leaving: list[dict] = []
 
     def _ev(self, ev: str, level: str = "info", **fields) -> None:
         """Событие журнала с днём и часами симуляции. Сбой журнала ход не ломает."""
         try:
             state = db.run() or {}
             fields = {"day": state.get("day"), "clock": state.get("clock"), **fields}
+            if db.current_place() != "cafe":
+                fields.setdefault("place", db.current_place())
             log.event(ev, level, **fields)
         except Exception:
             pass
@@ -223,12 +243,6 @@ class Engine:
         self._pause.clear()
         self.notify({"type": "status"})
 
-    def set_speed(self, speed: float) -> None:
-        self._ev("run.speed", speed=speed)
-        minutes = self._live_minutes()
-        db.set_run(speed=speed, clock_min=minutes, clock_real=time.time(), clock=format_clock(minutes))
-        self.notify({"type": "status"})
-
     async def reset(self) -> None:
         self._ev("run.reset", "warn")
         self.gen += 1
@@ -242,6 +256,12 @@ class Engine:
                 pass
         self.task = None
         db.reset_world()
+        self._trips.clear()
+        self._leaving.clear()
+        if self.city is not None:
+            self.city.clear()
+            self.city.populate(CITY_FOLK)
+            self.city.set_places(db.places())
         self._pause.clear()
         self.notify({"type": "reset"})
 
@@ -261,9 +281,7 @@ class Engine:
                 if gen != self.gen:
                     return
                 goal = db.run()["goal"]
-                stop = result == "transport" or (result == "day_complete" and goal != "auto") or (
-                    goal == "step" and result in ("ok", "schema")
-                )
+                stop = result == "transport" or (result == "day_complete" and goal != "auto")
                 if stop or not self._pause.is_set():
                     self._pause.clear()
                     continue
@@ -282,49 +300,66 @@ class Engine:
             self._open_day(plan=False)
             await self._story()
             await self._district()
-            await self._demographer()
-            self._plan_next(db.run()["day"], OPEN_MIN)
+            for place_id in venue_ids():
+                with db.at_place(place_id):
+                    await self._demographer()
+            day = db.run()["day"]
+            for place_id in venue_ids():
+                with db.at_place(place_id):
+                    self._plan_next(day, db.place(place_id)["open_min"])
             state = db.run()
         else:
             self._commit()
             state = db.run()
         clock = state["clock_min"]
         day = state["day"]
-        if state["goal"] == "step" and not db.waiting(day):
-            nxt = db.next_arrival(day)
-            target = nxt["minute"] if nxt else CLOSE_MIN
-            if target > clock:
-                clock = target
-                db.set_run(clock_min=clock, clock_real=time.time(), clock=format_clock(clock))
-        while True:
-            due = db.due_arrival(day, clock)
-            if not due:
-                break
-            self._admit(due)
-        queue = db.waiting(day)
-        if queue:
-            stopped = await self._patience_round(queue)
-            if stopped:
-                return stopped
-            queue = db.waiting(day)
-            if queue:
-                return await self._serve(queue[0]["id"])
-            return "ok"
-        if clock >= CLOSE_MIN and db.scheduled_left(day) == 0:
-            return await self._close_day()
+        ids = venue_ids()
+        self._turn += 1
+        for offset in range(len(ids)):
+            place_id = ids[(self._turn + offset) % len(ids)]
+            with db.at_place(place_id):
+                result = await self._tick_place(day, clock)
+            if result != "idle":
+                return result
+        if clock >= DAY_END:
+            left = 0
+            for place_id in ids:
+                with db.at_place(place_id):
+                    left += db.scheduled_left(day)
+            if left == 0:
+                return await self._close_day()
         await asyncio.sleep(0.4)
         return "wait"
+
+    async def _tick_place(self, day: int, clock: float) -> str:
+        """Один ход заведения: пришедшие встают в очередь, ждущие решают, ждать ли, следующий идёт к стойке.
+        Вернёт `idle`, если заведению сейчас делать нечего."""
+        if not db.one("SELECT id FROM arrivals WHERE day = ? AND place_id = ? LIMIT 1", (day, db.current_place())):
+            # День открыт без потока для этого заведения (например, заведение добавили посреди дня): разыграть первый приход
+            self._plan_next(day, max(clock, db.place(db.current_place())["open_min"]))
+        self._arrivals_due(day, clock)
+        queue = db.waiting(day)
+        if not queue:
+            return "idle"
+        stopped = await self._patience_round(queue)
+        if stopped:
+            return stopped
+        queue = db.waiting(day)
+        if queue:
+            return await self._serve(queue[0]["id"])
+        return "ok"
 
     async def _close_day(self) -> str:
         state = db.run()
         week_len = int(db.setting("days_per_week") or 5)
-        needs_manager = state["day"] % week_len == 0 and not db.one(
-            "SELECT id FROM weeks WHERE through_day = ?", (state["day"],)
-        )
-        if needs_manager or state["pending_manager"]:
+        if state["day"] % week_len == 0 or state["pending_manager"]:
             db.set_run(pending_manager=1)
-            if not await self._manager():
-                return "transport"
+            for place_id in venue_ids():
+                with db.at_place(place_id):
+                    if db.one("SELECT id FROM weeks WHERE through_day = ? AND place_id = ?", (state["day"], place_id)):
+                        continue
+                    if not await self._manager():
+                        return "transport"
             db.set_run(pending_manager=0)
         db.set_run(day_closed=1, phase="", active_agent="")
         stats = day_stats(state["day"])
@@ -344,33 +379,40 @@ class Engine:
             day_done=0,
             day_closed=0,
             pending_manager=0,
-            clock="08:00",
-            clock_min=OPEN_MIN,
+            clock=format_clock(DAY_START),
+            clock_min=DAY_START,
             clock_real=now,
             active_visit_id=None,
             phase="",
             active_agent="",
             message="",
         )
-        for person in db.staff():
-            db.set_staff_mood(person["id"], pick_mood(self.rng.random()))
+        for place_id in venue_ids():
+            with db.at_place(place_id):
+                for person in db.staff():
+                    db.set_staff_mood(person["id"], pick_mood(self.rng.random()))
         self._ev("day.open", day=day, popularity=round(current_popularity(), 2),
                  moods={person["id"]: person["mood"] for person in db.staff()})
         if plan:
-            self._plan_next(day, OPEN_MIN)
+            for place_id in venue_ids():
+                with db.at_place(place_id):
+                    self._plan_next(day, db.place(place_id)["open_min"])
         self.notify({"type": "day"})
 
     def _plan_next(self, day: int, after: float) -> None:
         """Разыграть минуту следующего прихода. Расписания на день нет: в базе всегда не больше одного будущего прихода."""
-        done = db.one("SELECT COUNT(*) AS n FROM visits WHERE day = ?", (day,))["n"]
-        if done + 1 >= MAX_VISITS_DAY:
+        venue = venue_now()
+        place = db.place(db.current_place())
+        done = db.one("SELECT COUNT(*) AS n FROM visits WHERE day = ? AND place_id = ?", (day, place["id"]))["n"]
+        if done + 1 >= venue.max_visits:
             self._ev("arrival.none", reason="потолок гостей за день", visits=done)
             return
         pop = current_popularity()
         voice = db.district_for(day)
-        gap = arrival_gap(after, pop, self.rng.random(), voice["curve"] if voice else None)
+        gap = arrival_gap(after, pop, self.rng.random(), voice["curve"] if voice else None,
+                          base=venue.base_per_hour, table=venue.day_curve)
         minute = int(round(after + gap))
-        if minute > CLOSE_MIN - 10:
+        if minute > place["close_min"] - 10:
             self._ev("arrival.none", reason="следующий гость пришёл бы после закрытия", gap=round(gap, 1))
             return
         db.add_arrivals(day, [minute])
@@ -383,39 +425,151 @@ class Engine:
             if db.referral_pool() > 0 and self.rng.random() < REFERRAL_CHANCE:
                 friend = db.take_referral()
                 if friend:
-                    source = f"Тебя позвал знакомый, {friend}: сказал, что в этой кофейне хорошо."
+                    source = f"Тебя позвал знакомый, {friend}: сказал, что {venue_now().this_place} хорошо."
             return db.insert_client(newcomer["name"], newcomer["trait"], newcomer["patience"], newcomer["budget"], day, source)
+        venue = venue_now()
         used = {client["name"] for client in db.clients()}
-        name = self.rng.choice(NAMES)
+        name = self.rng.choice(venue.names)
         if name in used:
             name = f"{name} {self.rng.randint(2, 9)}"
         source = None
         if db.referral_pool() > 0 and self.rng.random() < REFERRAL_CHANCE:
             friend = db.take_referral()
             if friend:
-                source = f"Тебя позвал знакомый, {friend}: сказал, что в этой кофейне хорошо."
+                source = f"Тебя позвал знакомый, {friend}: сказал, что {venue_now().this_place} хорошо."
         return db.insert_client(
             name,
-            self.rng.choice(TRAITS),
+            self.rng.choice(venue.traits),
             self.rng.randint(1, 5),
-            self.rng.choice([180, 250, 320, 450]),
+            self.rng.choice(venue.budgets),
             day,
             source,
         )
 
-    def _admit(self, arrival: dict) -> int:
-        """Гость пришёл: появляется у двери и встаёт в очередь. Кто он и в каком настроении, решается здесь,
-        бариста берёт его, когда освободится."""
+    def _arrivals_due(self, day: int, clock: float) -> None:
+        while True:
+            due = db.due_arrival(day, clock)
+            if not due:
+                break
+            self._come(due)
+
+    def _travel(self, client: dict) -> tuple[str, str | None]:
+        """Как человек добирается: на машине на парковку, пешком из дома или пешком с края квартала."""
+        n = client["id"] % 5
+        if n < 2:
+            return "car", None
+        if n < 4:
+            return "walk", HOME_IDS[client["id"] % len(HOME_IDS)]
+        return "walk", None
+
+    def _come(self, arrival: dict) -> None:
+        """Разыгранный приход: без города человек сразу у двери, с городом он выходит из дома или приезжает и идёт по улицам."""
+        if self.city is None:
+            self._admit(arrival)
+            return
+        client, known = self._pick(arrival)
+        place_id = db.current_place()
+        if not self.city.place_open(place_id, arrival["minute"]):
+            self._ev("visit.closed", "warn", client=client["name"], place=place_id, why="заведение закрыто")
+            return
+        mode, home = self._travel(client)
+        result = self.city.dispatch(client["id"], client["name"], place_id, mode, home)
+        if not result["ok"] and mode == "car":
+            self._ev("city.no_parking", "warn", client=client["name"], why=result["why"])
+            result = self.city.dispatch(client["id"], client["name"], place_id, "walk", None)
+        if not result["ok"]:
+            self._ev("city.dispatch_fail", "warn", client=client["name"], why=result["why"])
+            self._enter(client, known, float(arrival["minute"]), arrival["id"])
+            return
+        self._trips[client["id"]] = {"known": known, "arrival": arrival["id"], "place": place_id, "minute": arrival["minute"]}
+        self._ev("city.dispatch", client=client["name"], client_id=client["id"], mode=mode, home=home, place=place_id,
+                 planned=format_clock(arrival["minute"]))
+
+    def _schedule_release(self, client_id: int, end_min: float | None, stay: int | None) -> None:
+        """Когда гость выйдет из заведения и пойдёт дальше по городу: после визита, сидения и выхода к двери."""
+        if self.city is None:
+            return
+        walk_out = 1.6 if venue_now().kind == "cafe" else 0.6
+        day = db.run()["day"]
+        at = day * 1440 + (end_min if end_min is not None else self._live_minutes()) + (stay or 0) + walk_out
+        self._leaving.append({"client": client_id, "at": at})
+
+    def pump_city(self) -> None:
+        """Прибытия людей к дверям, выходы из заведений, записи города в журнал."""
+        city = self.city
+        for ev in city.drain_events():
+            trip = self._trips.pop(ev["client_id"], None)
+            place_id = ev.get("place") or "cafe"
+            if ev["kind"] == "gave_up":
+                self._ev("visit.gave_up", "warn", client_id=ev["client_id"], place=place_id, why=ev.get("why"))
+                continue
+            with db.at_place(place_id):
+                client = db.one("SELECT * FROM clients WHERE id = ?", (ev["client_id"],))
+                place = db.place(place_id)
+                if trip is None or client is None or place is None:
+                    city.release(ev["client_id"])
+                    continue
+                if ev["minute"] >= place["close_min"] or not city.place_open(place_id, ev["minute"]):
+                    self._ev("visit.closed", "warn", client=client["name"], place=place_id, why="пришёл к закрытой двери")
+                    city.release(ev["client_id"])
+                    continue
+                self._enter(client, trip["known"], float(ev["minute"]), trip["arrival"], side=ev.get("side"))
+        for item in [row for row in self._leaving if row["at"] <= city.t]:
+            self._leaving.remove(item)
+            city.release(item["client"])
+        for level, name, fields in city.drain_log():
+            log.event(name, level, **fields)
+
+    async def city_loop(self, broadcast) -> None:
+        """Город идёт по часам симуляции, пока прогон работает; кадры уходят зрителям."""
+        seen = -1
+        while True:
+            await asyncio.sleep(0.12)
+            try:
+                state = db.run()
+                if self.city is None or state["status"] != "running" or not state["day"]:
+                    continue
+                self.city.advance(state["day"], self._live_minutes())
+                self.pump_city()
+                if self.mind is not None:
+                    self.mind.poll()
+                if self.city.roster_version != seen:
+                    seen = self.city.roster_version
+                    self.notify({"type": "city"})
+                await broadcast(self.city.frame())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._ev("engine.crash", "error", where="city", **log.exc_fields(exc))
+                await asyncio.sleep(1.0)
+
+    def _pick(self, arrival: dict) -> tuple[dict, bool]:
+        """Кто придёт по этому разыгранному приходу: знакомый или новый человек. Следующий приход разыгрывается здесь."""
         state = db.run()
         day = state["day"]
         db.set_arrival(arrival["id"], status="done")
         self._plan_next(day, arrival["minute"])
         voice = db.district_for(day)
+        away = set(self._trips)  # кто уже в пути или у двери, второй раз не выберется
+        if self.city is not None:
+            away |= {ped.client_id for ped in self.city.peds.values() if ped.client_id}
         known = choose_arrival(
-            db.clients(), day, db.visited_today(day), current_popularity(), self.rng.random(), self.rng.random(),
+            db.clients(), day, db.visited_today(day) | away, current_popularity(), self.rng.random(), self.rng.random(),
             share=voice["newcomers"] if voice else None,
         )
         client = known or self._spawn(day)
+        return client, bool(known)
+
+    def _admit(self, arrival: dict) -> int:
+        """Гость пришёл: появляется у двери и встаёт в очередь. Кто он и в каком настроении, решается здесь,
+        бариста берёт его, когда освободится. Без города гость приходит в разыгранную минуту."""
+        client, known = self._pick(arrival)
+        return self._enter(client, known, float(arrival["minute"]), arrival["id"])
+
+    def _enter(self, client: dict, known: bool, minute: float, arrival_id: int | None = None, side: int | None = None) -> int:
+        """Человек у двери заведения: визит открыт, он стоит в очереди."""
+        state = db.run()
+        day = state["day"]
         mood = arrival_mood(self.rng.random(), self.rng.random(), client.get("mood"), client.get("liked"), 0)
         event_shift = int(sum(fx["amount"] for fx in event_effects("guest_mood")))
         if event_shift:
@@ -424,7 +578,7 @@ class Engine:
         visit_id = db.insert_visit(
             day=day,
             seq=state["day_done"],
-            clock=format_clock(arrival["minute"]),
+            clock=format_clock(minute),
             client_id=client["id"],
             staff_id=first["id"],
             status="waiting",
@@ -438,14 +592,16 @@ class Engine:
             memory_before=client["memory"] or "",
             memory_phrase="",
             outcome_note="",
-            start_min=float(arrival["minute"]),
+            start_min=float(minute),
             mood=mood,
             wait_min=0,
-            next_check=float(arrival["minute"] + QUEUE_CHECK_EVERY),
+            next_check=float(minute + QUEUE_CHECK_EVERY),
+            side=side,
         )
-        db.set_arrival(arrival["id"], visit_id=visit_id)
+        if arrival_id is not None:
+            db.set_arrival(arrival_id, visit_id=visit_id)
         self._ev("visit.arrive", visit_id=visit_id, client=client["name"], client_id=client["id"], trait=client["trait"],
-                 returning=bool(known), planned=format_clock(arrival["minute"]), mood=mood,
+                 returning=known, planned=format_clock(minute), mood=mood,
                  queue=len(db.waiting(day)), source=client.get("source") or None)
         self.notify({"type": "visit"})
         return visit_id
@@ -573,6 +729,9 @@ class Engine:
         slow = 1.0
         for fx in event_effects("slower_prep"):
             slow *= fx["amount"]
+        util = self._utilization()
+        if util is not None and util >= GPU_SLOW:
+            slow *= 1.5
         if slow > 1.0 and done["status"] == "served":
             item = catalog().get(done["served_item_id"] or "")
             extra = (item["minutes"] if item else 2) * (slow - 1.0)
@@ -596,7 +755,7 @@ class Engine:
         weekday, season = calendar(day)
         likes = db.recent_likes(25)
         mood = f"{sum(likes) / len(likes):.1f} из 5" if likes else "пока нет данных"
-        recent = "; ".join(f"день {row['day']}: {row['headline']}" for row in db.recent_events(4)) or "ничего особенного"
+        recent = "; ".join(f"день {row['day']}: {'невыполненное предложение: ' if row.get('proposals') else ''}{row['headline']}" for row in db.recent_events(4)) or "ничего особенного"
         menu = ", ".join(f"{item['id']} ({item['name']})" for item in db.items() if usable(item))
         crew = ", ".join(f"{row['id']} ({row['name']}, настроение {row.get('mood') or DEFAULT_MOOD})" for row in db.staff())
         return (
@@ -606,7 +765,7 @@ class Engine:
         )
 
     def _apply_event(self, day: int, data: dict, source: str, text: str | None) -> dict | None:
-        """Событие приводится к каталогу эффектов, записывается и применяется. Что вне границ, отбрасывается."""
+        """Применить проверенные действия и временные эффекты; сохранить невыполненные предложения."""
         items = {item["id"]: item for item in db.items()}
         crew = [row["id"] for row in db.staff()]
         event = clean_event(data, items, crew, max_days=1 if source == "director" else 3)
@@ -616,7 +775,13 @@ class Engine:
             self._ev("event.calm", source=source)
             return None
         until = day + max([fx["days"] for fx in event["effects"]] + [1]) - 1
-        db.add_event(day, until, source, text, event["headline"], event["story"], event["effects"])
+        changes, notes = apply_changes({key: dict(value) for key, value in items.items()}, data.get("changes", []), world=True)
+        proposals = list(data.get("proposals", [])) + notes
+        event["changes"], event["proposals"] = changes, proposals
+        if proposals:
+            event["story"] = "Предложение события: " + event["story"]
+        db.add_event(day, until, source, text, event["headline"], event["story"], event["effects"], changes, proposals)
+        self._ev("event.actions", changes=changes or None, proposals=proposals or None)
         names = {row["id"]: row["name"] for row in db.staff()}
         for fx in event["effects"]:
             if fx["type"] == "item_out":
@@ -666,10 +831,10 @@ class Engine:
         day = db.run()["day"]
         voice = db.district_for(day)
         share = voice["newcomers"] if voice else 0.3
-        expected = BASE_PER_HOUR * 12 * current_popularity()
+        expected = venue_now().base_per_hour * 12 * current_popularity()
         count = max(2, min(8, round(expected * share) + 1))
         weekday, season = calendar(day)
-        events = "; ".join(f"{e['headline']} ({e['story']})" for e in db.active_events(day)) or "ничего особенного"
+        events = "; ".join(f"{e['headline']} ({e['story']})" for e in db.active_events(day) if not e.get("proposals")) or "ничего особенного"
         known = ", ".join(row["name"] for row in db.clients()[:30]) or "пока никого"
         buzz = (voice or {}).get("buzz") or "ничего особенного"
         why = (voice or {}).get("why") or ""
@@ -679,16 +844,32 @@ class Engine:
             f"Уже известные имена (не повторяй): {known}.\nПридумай {count} новых людей."
         )
         try:
-            data = await self._speak("Демограф придумывает людей", "demographer", "demographer", prompt, None, False)
+            venue = venue_now()
+            key = "demographer" if venue.kind == "cafe" else f"demographer_{venue.kind}"
+            data = await self._speak("Демограф придумывает людей", "demographer", key, prompt, None, False)
         except (TransportError, SchemaError) as exc:
             self._ev("demographer.fail", "warn", reason=str(exc))
             db.set_run(phase="", active_agent="")
             return
         db.set_run(phase="", active_agent="")
         taken = {row["name"] for row in db.clients()} | {row["name"] for row in db.q("SELECT name FROM pool")}
-        guests = clean_newcomers(data, taken, limit=count + 2)
+        guests = clean_newcomers(data, taken, limit=count + 2, traits=venue_now().traits, budgets=venue_now().budgets)
         db.reset_pool(day, guests)
         self._ev("demographer.new", asked=count, made=len(guests), names=[g["name"] for g in guests] or None)
+
+    async def _realize_event(self, data: dict, text: str | None = None) -> dict:
+        if not data.get("headline") and not data.get("story") and not text:
+            return data
+        prompt = self._day_brief(db.run()["day"]) + "\nПолное меню: " + json.dumps(db.items(), ensure_ascii=False)
+        prompt += "\nСобытие: " + json.dumps(data, ensure_ascii=False) + "\nВброс владельца: " + (text or "нет")
+        try:
+            plan = await self._speak("Мир воплощает событие", "world", "world", prompt, None, False)
+            return {**data, "changes": plan["changes"], "proposals": plan["proposals"]}
+        except (TransportError, SchemaError) as exc:
+            self._ev("event.fail", "warn", source="world", reason=str(exc))
+            return {**data, "changes": [], "proposals": ["Действия события пока не проверены: " + str(exc)]}
+        finally:
+            db.set_run(phase="", active_agent="")
 
     async def _story(self) -> None:
         """Утром рассказчик придумывает день. Сбой модели не мешает дню: он остаётся обычным."""
@@ -704,13 +885,16 @@ class Engine:
             db.set_run(phase="", active_agent="")
             return
         db.set_run(phase="", active_agent="")
-        self._apply_event(day, data, "narrator", None)
+        data = await self._realize_event(data)
+        event = self._apply_event(day, data, "narrator", None)
+        if event and self.mind is not None and self.city is not None:
+            await self.mind.adjudicate("", event["headline"], event["story"])
 
     async def direct(self, text: str) -> dict | None:
         """Режиссёр: владелец пишет событие словами, модель переводит его в эффекты из каталога."""
         state = db.run()
         if not state["day"] or state["day_closed"]:
-            raise ValueError("Сначала откройте смену")
+            raise ValueError("Сначала откройте день")
         brief = self._day_brief(state["day"]) + f"\n\nВладелец вбросил событие: «{text.strip()[:200]}»"
         try:
             data = await self._speak("Режиссёр разбирает вброс", "director", "event", brief, None, False)
@@ -719,7 +903,11 @@ class Engine:
             data = {"headline": "", "story": "", "effects": []}
         finally:
             db.set_run(phase="", active_agent="")
-        return self._apply_event(state["day"], data, "director", text.strip()[:200])
+        data = await self._realize_event(data, text.strip()[:200])
+        event = self._apply_event(state["day"], data, "director", text.strip()[:200])
+        if self.mind is not None and self.city is not None:
+            await self.mind.adjudicate(text.strip()[:200], (event or {}).get("headline", ""), (event or {}).get("story", ""))
+        return event
 
     def end_event(self, event_id: int) -> bool:
         """Зритель завершил событие досрочно."""
@@ -732,11 +920,9 @@ class Engine:
 
     async def _queue_work(self, day: int) -> str | None:
         """Пока бариста занят: приходят новые гости, ждущие по отметкам решают, ждать ли (включая первого в очереди)."""
-        while True:
-            due = db.due_arrival(day, self._live_minutes())
-            if not due:
-                break
-            self._admit(due)
+        for place_id in venue_ids():
+            with db.at_place(place_id):
+                self._arrivals_due(day, self._live_minutes())
         return await self._patience_round(db.waiting(day), include_head=True)
 
     async def _hold(self, day: int, until: float) -> str | None:
@@ -766,7 +952,7 @@ class Engine:
             f"Ты {client['name']}. Характер: {client['trait']}. Терпение {client['patience']} из 5.\n"
             f"Настроение сейчас: {mood}.\n"
             f"{self._event_note()}"
-            f"Ты стоишь в очереди в кофейне уже {int(round(wait))} мин, перед тобой {ahead} чел. Бариста занят другим гостем.\n"
+            f"Ты стоишь в очереди {venue_now().where} уже {int(round(wait))} мин, перед тобой {ahead} чел. {venue_now().queue_phrase}\n"
             "Остаёшься ждать или уходишь?"
         )
         db.set_run(active_visit_id=visit["id"])
@@ -802,6 +988,7 @@ class Engine:
             memory_phrase=memory, outcome_note="Не дождался очереди",
         )
         db.finish_client(client["id"], 1, memory, None)
+        self._schedule_release(client["id"], now, 0)
         db.set_run(day_done=db.run()["day_done"] + 1)
         self._ev("visit.left", "warn", visit_id=visit["id"], waited=round(wait, 1), mood=mood)
         self.notify({"type": "visit"})
@@ -810,12 +997,31 @@ class Engine:
         return "transport" if result == "transport" else None
 
     def _event_note(self) -> str:
-        """Строка о сегодняшних событиях: роли учитывают её в тоне и словах."""
+        """Строка о сегодняшних событиях: роли учитывают её в тоне и словах. События касаются кофейни."""
+        if db.current_place() != "cafe":
+            return ""
         day = (db.run() or {}).get("day") or 0
         events = db.active_events(day) if day else []
         if not events:
             return ""
-        return "".join(f"Сегодня: {e['headline']}. {e['story']}\n".replace(". .", ".") for e in events[-2:])
+        return "".join(f"Сегодня: {e['headline']}. {e['story']}\n".replace(". .", ".") for e in events[-2:] if not e.get("proposals"))
+
+    def _utilization(self) -> float | None:
+        """Нагрузка на GPU, если заведение — ЦОД; для остальных None."""
+        if venue_now().kind != "datacenter":
+            return None
+        day = (db.run() or {}).get("day") or 0
+        return gpu_utilization(db.load_rows(day), day, DC_CAPACITY)
+
+    def _dc_load_line(self, venue: Venue) -> str:
+        util = self._utilization()
+        if util is None:
+            return ""
+        return f"Нагрузка на GPU сейчас {int(round(util * 100))}% ({gpu_status(util)}).\n"
+
+    def _dc_note(self, venue: Venue) -> str:
+        util = self._utilization()
+        return "В этот день GPU были перегружены, ответы шли медленно.\n" if util is not None and util >= GPU_SLOW else ""
 
     def _hints(self, role: str) -> str:
         """Напоминания роли по тому, что критик часто видел в последних диалогах."""
@@ -823,6 +1029,7 @@ class Engine:
         return ("\n".join(found) + "\n") if found else ""
 
     def _critic_prompt(self, visit: dict) -> str:
+        venue = venue_now()
         names = {"client": visit["client_name"], "staff": visit["staff_name"]}
         rows = []
         for number, row in enumerate(visit["lines"], 1):
@@ -830,7 +1037,7 @@ class Engine:
                 who = f"{names['client']} про себя" if row["action"] == "verdict" else f"Гость {names['client']}"
                 tag = ""
             else:
-                who = f"Бариста {names['staff']}"
+                who = f"{venue.staff_word.capitalize()} {names['staff']}"
                 tag = f" [{row['action']}{' ' + row['item_id'] if row['item_id'] else ''}]"
             rows.append(f"{number}. {who}{tag}: {row['text']}")
         outcome = {
@@ -839,8 +1046,8 @@ class Engine:
             "left": "Итог: гость не дождался и ушёл.",
         }.get(visit["status"], "Итог: разговор оборвался.")
         return (
-            f"Меню:\n{menu_block()}\n\n"
-            f"Настроения: гость {visit.get('mood') or DEFAULT_MOOD}, бариста {visit.get('staff_mood') or DEFAULT_MOOD}.\n"
+            f"{venue.item_word}:\n{menu_block()}\n\n"
+            f"Настроения: гость {visit.get('mood') or DEFAULT_MOOD}, {venue.staff_word} {visit.get('staff_mood') or DEFAULT_MOOD}.\n"
             f"Диалог:\n" + "\n".join(rows) + f"\n{outcome}"
         )
 
@@ -891,26 +1098,28 @@ class Engine:
             self._ev("mood.staff", staff=person["id"], was=was, now=mood, by="model", visit_id=visit_id)
 
     def _verdict_prompt(self, client: dict, visit: dict, item_name: str) -> str:
+        venue = venue_now()
         if visit["status"] == "served":
-            outcome = f"Тебе подали: {item_name}, заплатил {visit['price']} ₽."
+            outcome = f"{venue.served_phrase}: {item_name}, заплатил {visit['price']} ₽."
         elif visit["status"] == "left":
             outcome = "Ты не дождался своей очереди и ушёл, тебя так и не обслужили."
         else:
             outcome = "Тебе отказали, ты ушёл без заказа."
         before = plain_memory(client.get("memory") or "")
         history = f"Раньше здесь: {before}\n" if before else "Ты был здесь впервые.\n"
+        load = self._dc_note(venue)
         wait = visit.get("wait_min") or 0
         waited = f"Ты ждал своей очереди {int(round(wait))} мин.\n" if wait >= 5 else "Очереди не было.\n"
         return (
             f"Ты {client['name']}. Характер: {client['trait']}. Терпение {client['patience']} из 5.\n"
             f"{history}"
-            f"Ты пришёл в настроении: {visit.get('mood') or DEFAULT_MOOD}. Бариста ({visit['staff_name']}) выглядела так: {visit.get('staff_mood') or DEFAULT_MOOD}.\n"
-            f"{waited}"
+            f"Ты пришёл в настроении: {visit.get('mood') or DEFAULT_MOOD}. {venue.staff_look.format(name=visit['staff_name'], mood=visit.get('staff_mood') or DEFAULT_MOOD)}\n"
+            f"{waited}{load}"
             f"{self._hints('verdict')}"
             f"{self._event_note()}"
-            f"Сегодняшний разговор у стойки:\n{talk_lines(visit['id'])}\n"
+            f"Сегодняшний разговор {venue.spot}:\n{talk_lines(visit['id'])}\n"
             f"{outcome}\n"
-            "Ты вышел на улицу. Скажи про себя, как прошёл визит, оцени его, реши, вернёшься ли и когда, посоветуешь ли знакомым."
+            f"{venue.leave_phrase} Скажи про себя, как прошёл визит, оцени его, реши, вернёшься ли и когда, посоветуешь ли знакомым."
         )
 
     async def _verdict(self, visit_id: int, client: dict, visit: dict) -> str:
@@ -960,7 +1169,7 @@ class Engine:
             return await self.llm.complete(
                 agent=agent,
                 schema_key=schema_key,
-                system=load_system(agent),
+                system=load_system(agent, venue_now().prompts),
                 user=user,
                 visit_id=visit_id,
                 week_day=None,
@@ -976,7 +1185,9 @@ class Engine:
         catalog = {item["id"]: item for item in db.items()}
         item = catalog.get(chosen_id)
         note = ""
-        if reply["action"] == "serve" and item and usable(item):
+        util = self._utilization()
+        capacity_full = bool(util is not None and util >= GPU_FULL and item and (item.get("load_days") or 1) >= 30)
+        if reply["action"] == "serve" and item and usable(item) and not capacity_full:
             status = "served"
             price = item["price"]
             served_id = item["id"]
@@ -987,8 +1198,10 @@ class Engine:
             served_id = None
             label = item["name"] if item else (visit["requested_text"] or "без позиции")
             if reply["action"] == "serve":
-                note = "Позиция недоступна или не из меню, чек не создан."
+                note = "Нет ёмкости GPU под безлимит, оформление отклонено." if capacity_full else "Позиция недоступна или не из меню, чек не создан."
         rating = rating_for(status, asks, effective_patience(client["patience"], visit.get("mood")))
+        if rating and util is not None and util >= GPU_SLOW:
+            rating = max(1, rating - 1)
         memory = visit_trace(label, status, rating)
         db.update_visit(
             visit_id,
@@ -1000,9 +1213,11 @@ class Engine:
             memory_phrase=memory,
             outcome_note=note,
             end_min=self._live_minutes(),
-            stay_min=stay_minutes(visit_id, status, mood_value(visit.get("mood"))),
+            stay_min=stay_minutes(visit_id, status, mood_value(visit.get("mood"))) if venue_now().stay else 0,
         )
         db.finish_client(client["id"], rating, memory, served_id)
+        ended = db.visit(visit_id)
+        self._schedule_release(client["id"], ended["end_min"], ended["stay_min"])
         state = db.run()
         db.set_run(day_done=state["day_done"] + 1, phase="", active_agent="")
         self._commit()
@@ -1019,6 +1234,7 @@ class Engine:
             end_min=self._live_minutes(), stay_min=0,
         )
         db.finish_client(client_id, None, memory, None)
+        self._schedule_release(client_id, None, 0)
         state = db.run()
         fields = {
             "day_done": state["day_done"] + 1,
@@ -1035,7 +1251,8 @@ class Engine:
         state = db.run()
         summary = week_summary(state["day"])
         self._ev("manager.start", items=summary["menu_size"], visits=summary["visits"], wishes=len(summary["wishes"]))
-        db.set_run(phase="Управляющий читает неделю", active_agent="управляющий", message="")
+        who = "Управляющий" if db.current_place() == "cafe" else f"Управляющий {db.place(db.current_place())['name']}"
+        db.set_run(phase=f"{who} читает неделю", active_agent="управляющий", message="")
         self.notify({"type": "llm"})
         user = "Сводка недели:\n" + json.dumps(summary, ensure_ascii=False, indent=2)
         try:
@@ -1043,7 +1260,7 @@ class Engine:
                 data = await self.llm.complete(
                     agent="manager",
                     schema_key="manager",
-                    system=load_system("manager"),
+                    system=load_system("manager", venue_now().prompts),
                     user=user,
                     visit_id=None,
                     week_day=state["day"],
@@ -1058,7 +1275,9 @@ class Engine:
             self._store_week(state["day"], summary, "", [], [str(exc)])
             return True
         catalog = {item["id"]: dict(item) for item in db.items()}
-        applied, notes = apply_changes(catalog, data["changes"])
+        venue = venue_now()
+        applied, notes = apply_changes(catalog, data["changes"], prefix="new" if venue.kind == "cafe" else f"{db.current_place()[:2]}",
+                                       price_max=venue.price_max)
         for change in applied:
             if change["op"] == "add_item":
                 db.insert_item(change["item_id"], change["name"], change["price"], change["minutes"])
@@ -1087,15 +1306,16 @@ class Engine:
             past = memory + " Это уже было. Ту старую фразу не произноси и не пересказывай."
         else:
             past = "Первый визит: ты здесь впервые, прошлого заказа нет." + (f" {client['source']}" if client.get("source") else "")
+        venue = venue_now()
         habit = _habit(client, catalog())
         spoken = talk_lines(visit_id)
-        tone = "" if spoken else TRAIT_SAY.get(client.get("trait") or "", "")
+        tone = "" if spoken else venue.trait_say.get(client.get("trait") or "", "")
         mood = (db.visit(visit_id) or {}).get("mood")
         card = (
-            f"Меню:\n{menu}\n\n"
+            f"{venue.item_word}:\n{menu}\n\n"
             f"{self._hints('client')}"
             f"{self._event_note()}"
-            f"Ты {client['name']} у стойки. Характер: {client['trait']}. "
+            f"Ты {client['name']} {venue.spot}. Характер: {client['trait']}. "
             f"Терпение {client['patience']} из 5. Дороже {client['budget']} ₽ не бери и эту сумму вслух не называй. Цену тоже не называй.\n"
             + (f"Настроение сейчас: {mood}.\n" if mood else "")
             + f"{past}\n"
@@ -1103,22 +1323,23 @@ class Engine:
             + (f"{tone}\n" if tone else "")
         )
         if not spoken:
-            return card + "Скажи бариста, что берёшь сегодня. Характер вслух не зачитывай."
+            return card + f"Скажи {venue.staff_dat}, что берёшь сегодня. Характер вслух не зачитывай."
         return (
             card
             + "Этот же разговор, не новый заказ:\n"
             + spoken
-            + "\nОтветь на последнюю реплику бариста своими словами: если он спросил, что взять, выбери одну позицию и назови её. Его вопрос не повторяй и свою первую фразу не повторяй. Ты определился."
+            + f"\nОтветь на последнюю реплику {venue.staff_of} своими словами: если он спросил, что взять, выбери одну позицию и назови её. Его вопрос не повторяй и свою первую фразу не повторяй. Ты определился."
         )
 
     def _staff_prompt(self, person: dict, client: dict, menu: str, guest: dict, final: bool, visit_id: int) -> str:
         pace = "Работаешь быстрее обычного." if person["speed"] >= 1 else "Работаешь спокойнее и дольше."
-        voice = VOICES.get(person["id"], "Говоришь просто.")
+        venue = venue_now()
+        voice = venue.voices.get(person["id"], "Говоришь просто.")
         items = catalog()
         item = items.get(guest["item_id"])
         if item:
             picked = (
-                f"В поле заказа: {item['name']} ({item['id']}), {item['minutes']} мин, "
+                f"В поле заказа: {item['name']}, {item['minutes']} мин, "
                 f"{'есть' if usable(item) else 'скрыта'}."
             )
         else:
@@ -1141,9 +1362,10 @@ class Engine:
             )
         mood = next((row.get("mood") for row in db.staff() if row["id"] == person["id"]), None) or DEFAULT_MOOD
         return (
-            f"Меню:\n{menu}\n\n"
+            f"{venue.item_word}:\n{menu}\n\n"
             f"Ты {person['name']}. {pace} {voice}\n"
             f"Твоё настроение: {mood}.\n"
+            f"{self._dc_load_line(venue)}"
             f"{self._hints('staff')}"
             f"{self._event_note()}"
             f"Гость {client['name']}. {memory}\n"

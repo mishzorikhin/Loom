@@ -1,3 +1,4 @@
+import copy
 import json
 import time
 from datetime import datetime
@@ -8,6 +9,7 @@ import app.db as db
 from app import cassette, log
 from app.config import PROMPTS
 from app.rules import BUDGETS, CRITIC_CODES, EFFECT_TYPES, MOODS, TRAITS, style_problem
+from app.venues import DATACENTER
 
 
 class TransportError(Exception):
@@ -23,11 +25,14 @@ class SchemaError(Exception):
         self.raw = raw
 
 
-TEMPERATURE = {"client": 0.7, "verdict": 0.7, "staff": 0.4, "manager": 0.3, "critic": 0.1, "queue": 0.6, "narrator": 0.9, "director": 0.4, "district": 0.5, "demographer": 0.9}
-MAX_TOKENS = {"manager": 420, "critic": 560, "queue": 120, "narrator": 520, "director": 520, "district": 380, "demographer": 900, "verdict": 240}
+TEMPERATURE = {"adjudicator": 0.3, "crowd": 0.6, "client": 0.7, "verdict": 0.7, "staff": 0.4, "manager": 0.3, "critic": 0.1, "queue": 0.6, "narrator": 0.9, "director": 0.4, "world": 0.2, "district": 0.5, "demographer": 0.9}
+MAX_TOKENS = {"adjudicator": 900, "crowd": 700, "manager": 420, "critic": 560, "queue": 120, "narrator": 520, "director": 520, "world": 1000, "district": 380, "demographer": 900, "verdict": 240}
 
 
-def load_system(name: str) -> str:
+def load_system(name: str, venue: str = "") -> str:
+    """Описание роли. У заведения может быть свой подкаталог: роли без своего файла берутся из общего."""
+    if venue and (PROMPTS / venue / f"{name}.md").exists():
+        return (PROMPTS / venue / f"{name}.md").read_text(encoding="utf-8").strip()
     return (PROMPTS / f"{name}.md").read_text(encoding="utf-8").strip()
 
 
@@ -93,6 +98,22 @@ def validate(agent: str, data: dict, final_staff: bool = False) -> dict:
         _check(data, ["headline", "story", "effects"], {})
         if not isinstance(data["effects"], list):
             raise SchemaError("effects не список", json.dumps(data, ensure_ascii=False))
+        return data
+    if agent == "world":
+        _check(data, ["say", "changes", "proposals"], {})
+        if not isinstance(data["changes"], list) or not isinstance(data["proposals"], list) or any(not isinstance(x, str) for x in data["proposals"]):
+            raise SchemaError("Действия и предложения должны быть списками", json.dumps(data, ensure_ascii=False))
+        return data
+    if agent == "adjudicator":
+        _check(data, ["say", "ops"], {})
+        if not isinstance(data["ops"], list):
+            raise SchemaError("ops не список", json.dumps(data, ensure_ascii=False))
+        data["say"] = str(data.get("say") or "")
+        return data
+    if agent == "crowd":
+        _check(data, ["people"], {})
+        if not isinstance(data["people"], list):
+            raise SchemaError("people не список", json.dumps(data, ensure_ascii=False))
         return data
     if agent == "queue":
         _check(data, ["stay", "say"], {})
@@ -303,6 +324,85 @@ SCHEMAS = {
         },
     },
 }
+
+_PATCH_OP = {
+    "type": "object",
+    "properties": {
+        "op": {"type": "string", "enum": ["spawn", "modify", "remove", "area", "fact", "place"]},
+        "id": {"type": "string"},
+        "kind": {"type": "string"},
+        "x": {"type": "number"}, "y": {"type": "number"}, "r": {"type": "number"},
+        "blocks": {"type": "boolean"},
+        "hazard": {"type": "number"},
+        "minutes": {"type": "number"},
+        "effect": {"type": "string", "enum": ["damage", "mood", ""]},
+        "amount": {"type": "number"},
+        "text": {"type": "string"},
+        "status": {"type": "string"},
+        "label": {"type": "string"},
+        "shape": {"type": "string", "enum": ["circle", "ring", "square", "cloud", "star"]},
+        "color": {"type": "string"},
+        "size": {"type": "number"},
+    },
+    "required": ["op", "id", "kind", "x", "y", "r", "blocks", "hazard", "minutes", "effect", "amount", "text", "status", "label",
+                 "shape", "color", "size"],
+    "additionalProperties": False,
+}
+SCHEMAS["adjudicator"] = {
+    "name": "world_patch",
+    "schema": {
+        "type": "object",
+        "properties": {"say": {"type": "string"}, "ops": {"type": "array", "items": _PATCH_OP}},
+        "required": ["say", "ops"],
+        "additionalProperties": False,
+    },
+}
+SCHEMAS["crowd"] = {
+    "name": "crowd_choices",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "people": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "do": {"type": "string", "enum": ["continue", "flee", "watch", "wait", "home"]},
+                        "say": {"type": "string"},
+                        "mood": {"type": "string", "enum": list(MOODS)},
+                        "minutes": {"type": "number"},
+                    },
+                    "required": ["id", "do", "say", "mood", "minutes"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["people"],
+        "additionalProperties": False,
+    },
+}
+
+SCHEMAS["demographer_datacenter"] = copy.deepcopy(SCHEMAS["demographer"])
+_dc_guest = SCHEMAS["demographer_datacenter"]["schema"]["properties"]["guests"]["items"]["properties"]
+_dc_guest["trait"]["enum"] = list(DATACENTER.traits)
+_dc_guest["budget"]["enum"] = list(DATACENTER.budgets)
+
+SCHEMAS["world"] = {
+    "name": "world_actions",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "say": {"type": "string"},
+            "changes": SCHEMAS["manager"]["schema"]["properties"]["changes"],
+            "proposals": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["say", "changes", "proposals"],
+        "additionalProperties": False,
+    },
+}
+SCHEMAS["world"] = copy.deepcopy(SCHEMAS["world"])
+SCHEMAS["world"]["schema"]["properties"]["changes"]["items"]["properties"]["op"] = {"type": "string"}
 
 
 class LLM:

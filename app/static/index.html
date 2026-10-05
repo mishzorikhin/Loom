@@ -11,17 +11,14 @@
 </head>
 <body>
   <header class="hud">
-    <p class="place"><svg class="cup" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h12v5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V8zm12 1.5h1.5a2.5 2.5 0 0 1 0 5H16M8 3.5v2M12 3.5v2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="place">Кофейня на углу</span></p>
-    <p class="badge" id="daylabel">Смена закрыта</p>
+    <p class="place"><svg class="cup" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h12v5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V8zm12 1.5h1.5a2.5 2.5 0 0 1 0 5H16M8 3.5v2M12 3.5v2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="place">Loom</span></p>
+    <p class="badge" id="daylabel">День не начат</p>
     <div class="clockbox">
-      <h1 id="clockline">08:00:00</h1>
-      <p id="pace" class="pace">час за минуту</p>
+      <h1 id="clockline">00:00:00</h1>
+      <p id="pace" class="pace">час за 30 с</p>
     </div>
     <p class="viewers" id="viewers" title="Сколько вкладок смотрят эту симуляцию"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5C6.5 5 2.5 9.2 1.5 12c1 2.800 5 7 10.500 7s9.500-4.200 10.500-7C21.500 9.200 17.500 5 12 5zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm0-6.200a2.200 2.200 0 1 0 0 4.400 2.200 2.200 0 0 0 0-4.400z" fill="currentColor"/></svg><b id="viewers-n">1</b></p>
     <p id="status" class="status" role="status">стоит</p>
-    <button type="button" id="notes-btn" class="rating notes" title="Записки управляющего" aria-expanded="false" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/></svg><span id="notes-n"></span><i class="pin" hidden></i></button>
-    <button type="button" id="rating" class="rating" title="Отзывы гостей" aria-expanded="false"><b>★ <span id="rating-val">—</span></b><span id="rating-n"></span></button>
-    <p class="till"><span>Касса</span><b id="till">0 ₽</b></p>
     <button type="button" id="sound" class="icon" aria-pressed="false" title="Звук: колокольчик, касса">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z" fill="currentColor"/><path class="waves" d="M15.5 9a4 4 0 0 1 0 6M18 6.5a8 8 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     </button>
@@ -38,31 +35,13 @@
         </button>
         <button type="button" id="day" class="cmd">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="currentColor"/></svg>
-          <span>До закрытия<small>доиграть день</small></span>
-        </button>
-        <button type="button" id="step" class="cmd">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 1 6 6c0 5 2 6 2 6H4s2-1 2-6a6 6 0 0 1 6-6zm-2 15h4a2 2 0 0 1-4 0z" fill="currentColor"/></svg>
-          <span>Позвать гостя<small>только следующего</small></span>
+          <span>До конца суток<small>доиграть день</small></span>
         </button>
         <button type="button" id="pause" class="cmd">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg>
           <span>Пауза<small>заморозить часы</small></span>
         </button>
       </div>
-      <div class="speed" id="speed" role="group" aria-label="Темп">
-        <p>Темп <span>час за минуту — ×1</span></p>
-        <div class="seg">
-          <button type="button" data-speed="1" aria-pressed="true">×1</button>
-          <button type="button" data-speed="2" aria-pressed="false">×2</button>
-          <button type="button" data-speed="4" aria-pressed="false">×4</button>
-          <button type="button" data-speed="8" aria-pressed="false">×8</button>
-        </div>
-      </div>
-      <aside id="board" class="plaque" aria-label="Доска меню"></aside>
-      <section class="ribbon" id="ribbon" aria-label="Лента дня">
-        <h2>Лента дня</h2>
-        <ol id="ribbon-list"></ol>
-      </section>
       <form class="director" id="director" autocomplete="off">
         <label for="director-text">Режиссёр</label>
         <div class="director-row">
@@ -76,11 +55,13 @@
       </div>
     </nav>
     <div class="world" id="world">
-      <svg id="room" viewBox="0 0 960 580" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Зал кофейни"></svg>
+      <div id="room" role="img" aria-label="Изометрический мир кофейни"></div>
+      <div id="actor-access" class="actor-access-list" aria-label="Гости в зале"></div>
       <div class="camctl" id="camctl" role="group" aria-label="Камера и слои">
         <button type="button" id="cam-home" title="К кофейне (0, двойной клик)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5M6.5 10v9h11v-9M10 19v-5h4v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <button type="button" id="cam-in" title="Приблизить (+, колесо мыши)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6v12M6 12h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
         <button type="button" id="cam-out" title="Отдалить (−)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+        <button type="button" id="cam-traffic" title="К перекрёстку" aria-label="К перекрёстку"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2" width="10" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="6" r="1.6" fill="#d9604c"/><circle cx="12" cy="10.5" r="1.6" fill="#e3b13c"/><circle cx="12" cy="15" r="1.6" fill="#3b9c69"/><path d="M12 19v3" stroke="currentColor" stroke-width="1.7"/></svg></button>
         <span class="sep"></span>
         <label class="chip" title="Имена и настроение над людьми"><input type="checkbox" id="lay-names" checked><span>Имена</span></label>
         <label class="chip" title="Прохожие и машины на улице"><input type="checkbox" id="lay-life" checked><span>Улица</span></label>
@@ -90,8 +71,18 @@
       <div class="leftstack">
         <section id="eventbar" class="eventbar" hidden></section>
       </div>
-      <section id="reviews" class="drawer left" hidden></section>
-      <section id="manager" class="drawer left" hidden></section>
+      <div id="signs" class="layer"></div>
+      <aside id="inspect" class="inspect" hidden></aside>
+      <section id="placecard" class="drawer left" hidden aria-label="Заведение">
+        <div class="drawer-head"><h2 id="pc-name"></h2><button type="button" id="close-place">Закрыть</button></div>
+        <p class="pc-meta" id="pc-meta"></p>
+        <div class="tabs" id="pc-tabs" role="tablist"></div>
+        <div class="pc-pane" data-pane="menu"><aside id="board" class="plaque" aria-label="Доска меню"></aside></div>
+        <div class="pc-pane" data-pane="ribbon" hidden><ol id="ribbon-list" class="pc-list"></ol></div>
+        <div class="pc-pane" data-pane="reviews" id="reviews" hidden></div>
+        <div class="pc-pane" data-pane="notes" id="manager" hidden></div>
+        <div class="pc-pane" data-pane="info" id="pc-info" hidden></div>
+      </section>
       <section id="daycard" class="daycard" hidden></section>
 
       <section id="chats" class="drawer" hidden></section>
@@ -132,6 +123,7 @@
           <option value="critic">Критик</option>
           <option value="queue">Очередь</option>
           <option value="narrator">Рассказчик</option>
+          <option value="world">Действия мира</option>
           <option value="director">Режиссёр</option>
         </select>
       </label>
@@ -140,7 +132,11 @@
     <div id="monitor"></div>
     </div>
   </details>
+  <script src="/static/vendor/phaser-3.90.0.min.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/rooms.js"></script>
   <script src="/static/world.js"></script>
+  <script src="/static/traffic.js"></script>
+  <script src="/static/phaser-world.js"></script>
 </body>
 </html>
