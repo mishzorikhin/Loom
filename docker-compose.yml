@@ -1,0 +1,19 @@
+services:
+  simcheck:
+    build: .
+    image: simcheck
+    container_name: simcheck
+    ports:
+      - "8421:8421"
+    environment:
+      SIM_DB: /data/sim.db
+      LLM_BASE_URL: http://192.168.0.16:8080/v1
+      LLM_MODEL: qwen3.5-9b
+      LLM_TIMEOUT: "60"
+      SIM_RECORD: /data/cassette.jsonl
+    volumes:
+      - simcheck-data:/data
+    restart: unless-stopped
+
+volumes:
+  simcheck-data:
