@@ -47,8 +47,7 @@ MENU = [
 ]
 
 # Заведения квартала: id, тип, название, открытие, закрытие (минуты суток), дверь на карте (клетки), заметка.
-# Бизнес-логика (меню, персонал, визиты с разговором) в коде пока только у кофейни; у остальных есть часы работы
-# и посетители из города.
+# У кофейни и ЦОДа общий каркас: свои меню, персонал, визиты, очередь и часы работы.
 PLACES = [
     ("cafe", "cafe", "Кофейня на углу", OPEN_MIN, CLOSE_MIN, -0.7, 5.9, ""),
     ("neuraldeep", "datacenter", "NeuralDeep", 0, 1440, -4.7, 25.4,
@@ -70,6 +69,8 @@ def connect(path=DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     CONN = conn
     init()
+    from app.venue_api import init_tables
+    init_tables()
     return conn
 
 
@@ -337,7 +338,6 @@ def _ensure_place_columns() -> None:
 
 
 def _seed_places() -> None:
-    CONN.execute(f"DELETE FROM places WHERE id NOT IN ({', '.join('?' for _ in PLACES)})", tuple(row[0] for row in PLACES))
     for row in PLACES:
         CONN.execute(
             "INSERT INTO places(id, type, name, open_min, close_min, door_x, door_y, note) VALUES(?, ?, ?, ?, ?, ?, ?, ?) "
@@ -391,7 +391,7 @@ def _seed_unlocked() -> None:
 
 def reset_world() -> None:
     with LOCK:
-        for table in ("lines", "visits", "clients", "llm_calls", "weeks", "arrivals", "events", "district", "pool", "items", "staff", "run_state", "places"):
+        for table in ("agent_jobs", "external_venues", "lines", "visits", "clients", "llm_calls", "weeks", "arrivals", "events", "district", "pool", "items", "staff", "run_state", "places"):
             CONN.execute(f"DELETE FROM {table}")
         _seed_unlocked()
         CONN.commit()
@@ -834,10 +834,11 @@ def client_visits(client_id: int) -> list[dict]:
 
 
 def insert_item(item_id: str, name: str, price: int, minutes: int) -> None:
+    is_dc = place(current_place())["type"] == "datacenter"
     with tx() as conn:
         conn.execute(
             "INSERT INTO items(id, name, price, minutes, available, place_id, load, load_days) VALUES(?, ?, ?, ?, 1, ?, ?, ?)",
-            (item_id, name, price, minutes, current_place(), 0.1 if current_place() != "cafe" else 0, 5 if current_place() != "cafe" else 1),
+            (item_id, name, price, minutes, current_place(), 0.1 if is_dc else 0, 5 if is_dc else 1),
         )
 
 

@@ -13,17 +13,23 @@ measureSvg.setAttribute("aria-hidden", "true");
 measureSvg.style.cssText = "position:fixed;left:-20000px;top:0;width:1px;height:1px;visibility:hidden;pointer-events:none";
 document.body.appendChild(measureSvg);
 
+function cleanMarkup(markup) {
+  // Переменные цвета используются в исходных рисунках, а не в живом SVG-дереве.
+  return markup.replace(/var\(--sky\)/g, "#a8dcf4").replace(/var\(--sign\)/g, "#6fcf8a")
+    .replace(/var\(--sun\)/g, "1").replace(/var\(--night, 0\)/g, "0")
+    .replace(/<ellipse class="ring"[^>]*\/>/g, "");
+}
+
 function assetFor(markup) {
   let asset = textureAssets.get(markup);
   if (asset) return asset;
-  // Переменные цвета используются в исходных рисунках, а не в живом SVG-дереве.
-  const clean = markup.replace(/var\(--sky\)/g, "#a8dcf4").replace(/var\(--sign\)/g, "#6fcf8a")
-    .replace(/var\(--sun\)/g, "1").replace(/var\(--night, 0\)/g, "0")
-    .replace(/<ellipse class="ring"[^>]*\/>/g, "");
+  const clean = cleanMarkup(markup);
   measureSvg.innerHTML = `<g>${clean}</g>`;
   const bounds = measureSvg.firstChild.getBBox();
-  const x = Math.floor(bounds.x - 3), y = Math.floor(bounds.y - 3);
-  const w = Math.max(1, Math.ceil(bounds.width + 6)), h = Math.max(1, Math.ceil(bounds.height + 6));
+  // Размытые тени выходят за габариты фигур: даём запас, чтобы края не обрезались.
+  const pad = clean.includes("<filter") ? 14 : 3;
+  const x = Math.floor(bounds.x - pad), y = Math.floor(bounds.y - pad);
+  const w = Math.max(1, Math.ceil(bounds.width + pad * 2)), h = Math.max(1, Math.ceil(bounds.height + pad * 2));
   const scale = Math.min(2, 4096 / w, 4096 / h);
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(w * scale)}" height="${Math.ceil(h * scale)}" viewBox="${x} ${y} ${w} ${h}">${clean}</svg>`;
   measureSvg.replaceChildren();
@@ -51,7 +57,9 @@ function svgObject(markup) {
   asset.promise.then(() => {
     if (!object.scene) return;
     const image = phaserScene.add.image(asset.x, asset.y, asset.key).setOrigin(0).setDisplaySize(asset.w, asset.h);
+    // Рисунок приходит позже уже добавленных детей (свет окон, крона, колёса): он должен лежать под ними.
     object.add(image);
+    object.sendToBack(image);
   }).catch((err) => clientLog("error", { message: err.message }));
   object.once("destroy", () => {
     asset.refs -= 1;
@@ -69,11 +77,84 @@ function svgObject(markup) {
   return object;
 }
 
+/* Земля — одна большая картинка, которая в один растр не помещается с нужной чёткостью. Режем её на плитки:
+   в центре плитки резче, на краях карты грубее. Каждая плитка — тот же рисунок со своим окном viewBox. */
+const LAND_TILE = 1024;
+/* Три зоны: у перекрёстка и зала резко (1.4), в остальном квартале средне (0.95), на краях карты грубо. */
+const LAND_ZONES = [
+  { x0: -1100, x1: 1100, y0: -350, y1: 900, scale: 1.4 },
+  { x0: -1900, x1: 1900, y0: -800, y1: 1250, scale: 0.95 },
+];
+const LAND_FAR = 0.5;
+
+function landObject(markup) {
+  const clean = cleanMarkup(markup);
+  measureSvg.innerHTML = `<g>${clean}</g>`;
+  const b = measureSvg.firstChild.getBBox();
+  measureSvg.replaceChildren();
+  const holder = phaserScene.add.container(0, 0);
+  const inWorld = (sx, sy) => {
+    // обратный iso: мир — квадрат вокруг карты, плитки вне него пусты
+    const u = sx / TW, v = sy / TH;
+    const wx = (u + v) / 2, wy = (v - u) / 2;
+    return wx > -36 && wx < 44 && wy > -36 && wy < 44;
+  };
+  const tiles = [];
+  for (let tx = Math.floor(b.x / LAND_TILE) * LAND_TILE; tx < b.x + b.width; tx += LAND_TILE) {
+    for (let ty = Math.floor(b.y / LAND_TILE) * LAND_TILE; ty < b.y + b.height; ty += LAND_TILE) {
+      let used = false;
+      for (let i = 0; i <= 4 && !used; i += 1) for (let j = 0; j <= 4 && !used; j += 1) used = inWorld(tx + i * LAND_TILE / 4, ty + j * LAND_TILE / 4);
+      if (!used) continue;
+      const zone = LAND_ZONES.find((z) => tx + LAND_TILE > z.x0 && tx < z.x1 && ty + LAND_TILE > z.y0 && ty < z.y1);
+      tiles.push({ tx, ty, scale: zone ? zone.scale : LAND_FAR });
+    }
+  }
+  tiles.forEach((tile, index) => {
+    const size = LAND_TILE + 2;
+    const px = Math.ceil(size * tile.scale);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${px}" height="${px}" viewBox="${tile.tx - 1} ${tile.ty - 1} ${size} ${size}">${clean}</svg>`;
+    const img = new Image();
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    const key = `loom:land:${++textureSerial}`;
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      if (!holder.scene) return;
+      phaserScene.textures.addImage(key, img);
+      holder.add(phaserScene.add.image(tile.tx - 1, tile.ty - 1, key).setOrigin(0).setDisplaySize(size, size));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); clientLog("error", { message: "Не загрузилась плитка земли" }); };
+    img.src = url;
+  });
+  return holder;
+}
+
+/* Радиальное свечение: одна канвас-текстура, из неё же фонари, окна, светофоры и пар. Цвет задаёт tint. */
+function ensureSoftTextures() {
+  if (!phaserScene.textures.exists("loomGlow")) {
+    const tex = phaserScene.textures.createCanvas("loomGlow", 128, 128);
+    const ctx = tex.getContext();
+    const grad = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+    grad.addColorStop(0, "rgba(255,255,255,1)");
+    grad.addColorStop(0.35, "rgba(255,255,255,0.45)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 128, 128);
+    tex.refresh();
+  }
+}
+
+function glowImage(x, y, w, h, tint, depth) {
+  return phaserScene.add.image(x, y, "loomGlow").setDisplaySize(w, h).setTint(tint).setBlendMode(Phaser.BlendModes.ADD).setDepth(depth).setAlpha(0);
+}
+
 function worldBuild() {
-  const terrain = landSvg().replace(/<rect[^>]*\/>/, "");
-  scene.land = svgObject(terrain).setDepth(-1000);
+  ensureSoftTextures();
+  const terrain = landSvg();
+  scene.land = landObject(terrain).setDepth(-1000);
   const items = [...HOUSES.map((h) => ({ kind: "house", ...h })), ...worldProps()];
-  svgObject(items.filter((p) => p.kind === "house").map(houseShadow).join("")).setDepth(-900);
+  HOUSES.forEach((h) => svgObject(houseShadows([h])).setDepth(-900));
+  // Тинт времени суток: умножение под светом фонарей и окон (глубина ниже 8000), днём белый и ничего не меняет.
+  scene.tint = phaserScene.add.rectangle(0, 0, 10, 10, 0xffffff).setDepth(7900).setBlendMode(Phaser.BlendModes.MULTIPLY);
   const statics = [];
   scene.windowGlows = [];
   scene.smoke = [];
@@ -92,23 +173,30 @@ function worldBuild() {
         chimney.parentNode.remove();
       }
       el = svgObject(source.innerHTML);
-      if (glowMarkup) { const glow = svgObject(glowMarkup).setAlpha(0); el.add(glow); scene.windowGlows.push(glow); }
+      // Окна светят поверх ночного тинта, поэтому лежат отдельно от дома.
+      if (glowMarkup) { const glow = svgObject(glowMarkup).setAlpha(0).setDepth(8002); scene.windowGlows.push(glow); }
       if (smokeAt) for (let i = 0; i < 3; i += 1) {
-        const puff = phaserScene.add.circle(0, 0, 3.2, 0xf4f1ea); el.add(puff);
+        const puff = phaserScene.add.circle(0, 0, 3.2, 0xffffff); el.add(puff);
         scene.smoke.push({ puff, at: smokeAt, off: i * 1.3 });
       }
     }
     else {
-      const markup = { tree: () => treeSvg(p.s, 0), bush: () => bushSvg(p.s), rock: () => rockSvg(p.s), lamp: lampSvg, bench: () => benchSvg(p.axis) }[p.kind]();
+      // Размер задаёт масштаб объекта, а не новый рисунок: текстур столько, сколько видов, а не деревьев.
+      const markup = {
+        tree: () => treeSvg(1, 0, p.v || 0), bush: () => bushSvg(1, p.v || 0), rock: () => rockSvg(1), lamp: lampSvg, bench: () => benchSvg(p.axis),
+        bed: () => bedSvg(p.axis), bin: binSvg, hydrant: hydrantSvg, sign: signSvg,
+      }[p.kind]();
       if (p.kind === "tree") {
         const source = nodeOf(markup), canopy = source.querySelector(".sway");
         const leaves = svgObject(canopy.outerHTML); canopy.remove();
         el = svgObject(source.innerHTML).setPosition(...iso(p.x, p.y, G));
         el.add(leaves); scene.trees.push({ leaves, off: p.x * 7 + p.y * 3 });
       } else el = svgObject(markup).setPosition(...iso(p.x, p.y, G));
+      if (p.s) el.setScale(p.s);
     }
     const r = p.kind === "tree" ? 0.5 : p.kind === "bench" ? 0.9 : 0.3;
-    const bounds = p.kind === "house" ? [p.x, p.x + p.w, p.y, p.y + p.d] : [p.x - r, p.x + r, p.y - r, p.y + r];
+    let bounds = p.kind === "house" ? [p.x, p.x + p.w, p.y, p.y + p.d] : [p.x - r, p.x + r, p.y - r, p.y + r];
+    if (p.kind === "bed") bounds = p.axis === "y" ? [p.x - 0.5, p.x + 0.5, p.y - 1, p.y + 1] : [p.x - 1, p.x + 1, p.y - 0.5, p.y + 0.5];
     statics.push({ el, d, box: bounds });
   });
   scene.signals = [
@@ -117,25 +205,19 @@ function worldBuild() {
     { axis: "y", x: ROAD_X0 - 0.6, y: ROAD_X0 - 2.8 },
     { axis: "y", x: ROAD_X1 + 0.6, y: ROAD_X1 + 2.8 },
   ].map((spec) => {
-    const el = phaserScene.add.container(...iso(spec.x, spec.y, G));
-    const body = phaserScene.add.graphics();
-    body.fillStyle(0x7a8584).fillRect(-1.6, -43, 3.2, 44);
-    body.fillStyle(0x687371).fillEllipse(0, 1, 13, 5);
-    body.fillStyle(0x18282d).fillRoundedRect(-7.5, -71, 15, 34, 3);
-    body.lineStyle(1, 0x58696e).strokeRoundedRect(-7.5, -71, 15, 34, 3);
-    const colors = { red: 0xff564c, yellow: 0xffc342, green: 0x68e5a2 };
-    const lamps = Object.entries(colors).map(([name, color], i) => ({ name, color, dot: phaserScene.add.circle(0, -64 + i * 10, 3.4, color) }));
-    el.add([body, ...lamps.map((l) => l.dot)]);
-    statics.push({ el, d: spec.x + spec.y, box: [spec.x - 0.2, spec.x + 0.2, spec.y - 0.2, spec.y + 0.2] });
-    return { ...spec, el, lamps };
+    const signal = makeTrafficSignal(spec);
+    statics.push({ el: signal.el, d: spec.x + spec.y, box: [spec.x - 0.2, spec.x + 0.2, spec.y - 0.2, spec.y + 0.2] });
+    return signal;
   });
-  const birds = Array.from({ length: 5 }, () => svgObject('<path d="M-6 1 Q-3 -4 0 0 Q3 -4 6 1" fill="none" stroke="#3b4a52" stroke-width="1.5" stroke-linecap="round"/>').setDepth(9000));
+  const birds = Array.from({ length: 5 }, () => svgObject(birdSvg()).setDepth(9000));
   outer = { statics, birds };
   // Свет — самостоятельные объекты Phaser, меняется без перегенерации текстур.
   scene.glows = [];
+  scene.halos = [];
   items.filter((p) => p.kind === "lamp").forEach((p) => {
     const [x, y] = iso(p.x, p.y, G);
-    scene.glows.push(phaserScene.add.ellipse(x, y, 52, 18, 0xffe9a0).setDepth(8000));
+    scene.glows.push(glowImage(x + 3, y + 2, 150, 62, 0xffdf92, 8000));
+    scene.halos.push(glowImage(x + 2, y - 48, 54, 54, 0xffe7a8, 8001));
   });
 }
 
@@ -256,12 +338,13 @@ function drawCity(rows) {
     car.brakes.setVisible(Boolean(flags & 1) && car.car.dir < 0);
     const shape = CAR_KINDS[car.kind];
     const P = (u, v, z) => car.car.axis === "x" ? iso(u * car.car.dir, v, G + z) : iso(v, u * car.car.dir, G + z);
-    car.wheels.clear().lineStyle(0.7, 0x52616a);
+    car.wheels.clear().lineStyle(0.8, 0x6b717c);
     [-shape.L / 2 + 0.5, shape.L / 2 - 0.5].forEach((u) => {
-      const [cx, cy] = P(u, shape.W / 2 + 0.05, 5);
+      // спицы на колпаке колеса (art/vehicles/cars.js: центр 5.8 px, колпак 0.62 радиуса 5.6 px)
+      const [cx, cy] = P(u, shape.W / 2 + 0.06, 5.8);
       for (let i = 0; i < 3; i += 1) {
         const angle = wheel / 0.32 + i * Math.PI * 2 / 3;
-        const [xw, yw] = P(u + Math.cos(angle) * 0.14, shape.W / 2 + 0.05, 5 + Math.sin(angle) * 2.6);
+        const [xw, yw] = P(u + Math.cos(angle) * 0.1, shape.W / 2 + 0.06, 5.8 + Math.sin(angle) * 3.2);
         car.wheels.lineBetween(cx, cy, xw, yw);
       }
     });
@@ -276,13 +359,36 @@ function drawCity(rows) {
   cityCars.forEach((car, id) => { if (!seenCars.has(id)) dropCity(cityCars, id); });
 }
 
+/* Пар над кофемашиной кофейни: несколько мягких клубов поднимаются и тают, пока заведение открыто. */
+function drawSteam(mins) {
+  const room = ROOMS.get("cafe");
+  if (!room) return;
+  if (!scene.steam) {
+    const [sx, sy] = withRoom(room, () => iso(...STEAM_AT));
+    scene.steam = { x: sx, y: sy, puffs: Array.from({ length: 5 }, () => glowImage(sx, sy, 20, 20, 0xffffff, 5000)) };
+  }
+  const place = placeOf("cafe");
+  const open = layers.life && Boolean(place) && placeIsOpen(place);
+  scene.steam.puffs.forEach((puff, i) => {
+    const t = (((mins * 1.4 + i / 5) % 1) + 1) % 1;
+    puff.setPosition(scene.steam.x + Math.sin(t * 5 + i) * 2.5 + t * 4, scene.steam.y - t * 34)
+      .setDisplaySize(7 + t * 20, 7 + t * 20)
+      .setAlpha(open ? Math.sin(t * Math.PI) * 0.34 : 0);
+  });
+}
+
 /* Общий проход по глубине: объекты мира, залы заведений (`roomRows`), люди и машины сортируются вместе. */
 function drawAmbient(mins, roomRows = []) {
   if (!outer) return;
   const rows = [...outer.statics, ...roomRows];
   scene.signals.forEach((signal) => {
     const color = Traffic.signal(mins, signal.axis);
-    signal.lamps.forEach((lamp) => lamp.dot.setFillStyle(lamp.color, lamp.name === color ? 1 : 0.12));
+    signal.lamps.forEach((lamp) => {
+      const on = lamp.name === color;
+      lamp.dot.setFillStyle(lamp.color, on ? 1 : 0.14);
+      lamp.shine.setAlpha(on ? 0.6 : 0.08);
+      lamp.halo.setAlpha(on ? 0.5 : 0);
+    });
   });
   drawCity(rows);
   isoSort(rows);
@@ -290,6 +396,7 @@ function drawAmbient(mins, roomRows = []) {
     row.el.setDepth(1000 + index);
     if (row.after) row.after.forEach((el, k) => el.setDepth(1000 + index + 0.1 * (k + 1)));
   });
+  drawSteam(mins);
   scene.smoke.forEach(({ puff, at, off }) => {
     const t = ((mins + off) % 4 + 4) % 4 / 4;
     puff.setPosition(at[0] + t * 7, at[1] - t * 25).setScale(0.6 + t * 1.6).setAlpha((1 - t) * 0.5);
@@ -303,7 +410,9 @@ function drawAmbient(mins, roomRows = []) {
 
 function updateSceneLight(light, mins) {
   const night = nightLevel(light, mins);
-  scene.glows.forEach((glow) => glow.setAlpha(night * 0.35));
+  if (scene.tint && light.tint) scene.tint.setFillStyle(Phaser.Display.Color.HexStringToColor(light.tint).color);
+  scene.glows.forEach((glow) => glow.setAlpha(night * 0.55));
+  scene.halos.forEach((halo) => halo.setAlpha(night * 0.8));
   scene.windowGlows.forEach((glow) => glow.setAlpha(night * 0.95));
   // Окно и табличка открытия каждого зала рисуются геометрией, их цвет зависит от снимка.
   ROOMS.forEach((room) => withRoom(room, () => {
@@ -355,6 +464,7 @@ function camApply() {
   view.y = CAM.cy - view.h / 2;
   phaserScene.cameras.main.setSize(w, h).setZoom(view.k).centerOn(CAM.cx, CAM.cy);
   tagK = Phaser.Math.Clamp(CAM.z ** -0.6, 0.6, 1.45);
+  if (scene && scene.tint) scene.tint.setPosition(CAM.cx, CAM.cy).setDisplaySize(view.w * 1.05, view.h * 1.05);
   document.getElementById("cam-home").disabled = Math.abs(CAM.z - 1) < 0.01 && Math.abs(CAM.cx - HOME.x - HOME.w / 2) < 2 && Math.abs(CAM.cy - HOME.y - HOME.h / 2) < 2;
   if (snap) { drawActors(); renderFloat(); }
 }

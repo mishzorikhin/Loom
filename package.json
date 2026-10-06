@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "test:browser": "node tests/browser/phaser.cjs",
+    "test:external": "node tests/browser/external-venues.cjs",
     "test:traffic": "node tests/browser/traffic.cjs"
   },
   "devDependencies": {

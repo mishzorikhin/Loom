@@ -77,6 +77,48 @@ def walk(city, minutes, day=1):
 
 
 class CityEngineTest(unittest.TestCase):
+    def test_reset_cancels_pending_world_answer(self):
+        async def go():
+            engine, llm, city = make()
+            started = asyncio.Event()
+            cancelled = asyncio.Event()
+            async def pending():
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+            engine.mind._spawn(pending())
+            await started.wait()
+            engine.mind.watch.append({"old": True})
+            engine.mind.cache[(1,)] = (10, {})
+            await engine.reset()
+            self.assertTrue(cancelled.is_set())
+            self.assertFalse(engine.mind.tasks)
+            self.assertFalse(engine.mind.watch)
+            self.assertFalse(engine.mind.cache)
+        run(go())
+
+    def test_crowd_thinking_and_changed_hazard_trigger_new_decision(self):
+        async def go():
+            engine, llm, city = make()
+            ped = next(iter(city.peds.values()))
+            hazard = [0]
+            city.percept = lambda p, alerts: {"time": "12:00", "trait": p.trait,
+                                             "near": [{"kind": "cloud", "hazard": hazard[0]}], "facts": []}
+            calls = []
+            async def complete(**kwargs):
+                calls.append(db.run()["thinking"])
+                return {"people": [{"id": ped.id, "do": "continue", "say": "", "mood": "спокойствие", "minutes": 1}]}
+            llm.complete = complete
+            await engine.mind._decide([{"ped": ped, "alerts": []}])
+            await engine.mind._decide([{"ped": ped, "alerts": []}])
+            hazard[0] = 1
+            await engine.mind._decide([{"ped": ped, "alerts": []}])
+            self.assertEqual(calls, [1, 1])
+            self.assertEqual(db.run()["thinking"], 0)
+        run(go())
+
     def test_arrival_happens_at_the_door_not_at_the_planned_minute(self):
         engine, llm, city = make()
         engine._open_day()

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Машины — песочница</title>
+<style>
+  body { margin: 0; background: #e9e2d4; font: 14px/1.4 system-ui, sans-serif; color: #2b3242; }
+  header { padding: 12px 20px; display: flex; gap: 16px; align-items: center; }
+  header label { display: flex; gap: 6px; align-items: center; }
+  svg { display: block; width: 100vw; height: calc(100vh - 52px); }
+</style>
+</head>
+<body>
+<header>
+  <b>Машины</b>
+  <label><input type="checkbox" id="brake"> стоп-сигналы</label>
+  <label>масштаб <input type="range" id="zoom" min="1" max="5" step="0.1" value="2.6"></label>
+</header>
+<svg id="stage"></svg>
+<script>
+  // минимальная обвязка вместо app.js: проекция и примитивы
+  const TW = 36, TH = 18, ISO_OFF = [0, 0];
+  function iso(x, y, z = 0) { return [(x - y) * TW, (x + y) * TH - z]; }
+  function pt(p) { const [sx, sy] = iso(p[0], p[1], p[2] || 0); return `${sx.toFixed(1)},${sy.toFixed(1)}`; }
+  function face(points, fill, alpha) {
+    const op = alpha === undefined ? "" : ` fill-opacity="${alpha}"`;
+    return `<polygon points="${points.map(pt).join(" ")}" fill="${fill}"${op} stroke="${fill}" stroke-opacity="${alpha === undefined ? 1 : alpha}" stroke-width="0.7" stroke-linejoin="round"/>`;
+  }
+  function box(x, y, w, d, h, top, south, east, z0 = 0) {
+    const x1 = x + w, y1 = y + d, z1 = z0 + h;
+    return [face([[x, y1, z0], [x1, y1, z0], [x1, y1, z1], [x, y1, z1]], south), face([[x1, y, z0], [x1, y1, z0], [x1, y1, z1], [x1, y, z1]], east), face([[x, y, z1], [x1, y, z1], [x1, y1, z1], [x, y1, z1]], top)].join("");
+  }
+  function mix(a, b, t) {
+    const pa = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16));
+    const pb = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
+    return `#${pa.map((v, i) => Math.round(v + (pb[i] - v) * t).toString(16).padStart(2, "0")).join("")}`;
+  }
+  const shade = (c, t) => mix(c, "#000000", t);
+  const lighten = (c, t) => mix(c, "#ffffff", t);
+  const G = 0;
+</script>
+<script src="../palette.js"></script>
+<script src="../util.js"></script>
+<script src="../vehicles/kinds.js"></script>
+<script src="../vehicles/model.js"></script>
+<script src="../vehicles/cars.js"></script>
+<script src="../vehicles/brake.js"></script>
+<script>
+  const stage = document.getElementById("stage");
+  const LANES = [["x", 1], ["x", -1], ["y", 1], ["y", -1]];
+  const KINDS = ["sedan", "hatch", "van"];
+  function road() {
+    const parts = [];
+    // асфальт квадратом и разметка
+    parts.push(`<polygon points="${[[-4, -4, 0], [16, -4, 0], [16, 16, 0], [-4, 16, 0]].map(pt).join(" ")}" fill="${PAL.road}"/>`);
+    for (let i = -4; i < 16; i += 1) {
+      parts.push(`<polygon points="${[[i, 1.95, 0], [i + 0.5, 1.95, 0], [i + 0.5, 2.05, 0], [i, 2.05, 0]].map(pt).join(" ")}" fill="${PAL.paint}" fill-opacity=".7"/>`);
+    }
+    return parts.join("");
+  }
+  function draw() {
+    const brake = document.getElementById("brake").checked;
+    const z = Number(document.getElementById("zoom").value);
+    const rows = [];
+    KINDS.forEach((kind, ki) => {
+      LANES.forEach(([axis, dir], li) => {
+        const col = PAL.carColors[(ki * 4 + li) % PAL.carColors.length];
+        const x = li * 3.4, y = ki * 3.6;
+        rows.push({ d: x + y, svg: `<g transform="translate(${iso(x, y)[0]} ${iso(x, y)[1]})">${carSvg(col, axis, dir, kind, kind === "sedan" && li === 0)}${brake && dir < 0 ? carBrakeSvg({ axis, dir, kind }) : ""}</g>` });
+      });
+    });
+    rows.sort((a, b) => a.d - b.d);
+    const w = innerWidth / z, h = (innerHeight - 52) / z;
+    stage.setAttribute("viewBox", `${-w / 2 + 120} ${-60} ${w} ${h}`);
+    stage.innerHTML = road() + rows.map((r) => r.svg).join("");
+  }
+  document.getElementById("brake").onchange = draw;
+  document.getElementById("zoom").oninput = draw;
+  draw();
+</script>
+</body>
+</html>

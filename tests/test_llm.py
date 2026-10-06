@@ -1,5 +1,7 @@
 import asyncio
 import os
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,7 +10,7 @@ os.environ["SIM_LOG_STDOUT"] = "0"
 import httpx  # noqa: E402
 
 import app.db as db  # noqa: E402
-from app.llm import LLM  # noqa: E402
+from app.llm import LLM, SCHEMAS, SchemaError, check_schema, parse_content  # noqa: E402
 from app.view import snapshot  # noqa: E402
 
 
@@ -97,6 +99,69 @@ class KeyAndHealthTest(unittest.TestCase):
             return httpx.Response(503)
 
         self.assertIn("health 503", self.check(sick)["detail"])
+
+
+class StructuredOutputTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        db.connect(Path(self.tmp.name) / "sim.db")
+        db.reset_world()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def complete(self, handler, agent="queue", key="queue"):
+        async def go():
+            llm = answer(handler)
+            try:
+                return await llm.complete(agent=agent, schema_key=key, system="s", user="u",
+                                          visit_id=None, week_day=None)
+            finally:
+                await llm.aclose()
+        return asyncio.run(go())
+
+    def test_string_false_retries_then_fails_instead_of_waiting(self):
+        seen = []
+        def handler(request):
+            seen.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": [{"message": {
+                "content": '{"stay":"false","say":"Ухожу"}'}, "finish_reason": "stop"}]})
+        with self.assertRaises(SchemaError):
+            self.complete(handler)
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(seen[0]["response_format"]["json_schema"]["strict"])
+
+    def test_length_retries_with_larger_budget_even_for_valid_json(self):
+        budgets = []
+        def handler(request):
+            budgets.append(json.loads(request.content)["max_tokens"])
+            return httpx.Response(200, json={"choices": [{"message": {
+                "content": '{"stay":false,"say":"Ухожу"}'},
+                "finish_reason": "length" if len(budgets) == 1 else "stop"}]})
+        self.assertFalse(self.complete(handler)["stay"])
+        self.assertEqual(budgets, [120, 240])
+        self.assertIn("лимиту", db.recent_llm(2)[-1]["error"])
+
+    def test_invalid_envelopes_fail_as_schema_errors(self):
+        for payload in ([], {"choices": [None]}, {"choices": [{}]},
+                        {"choices": [{"message": {"content": ["wrong"]}}]},
+                        {"choices": [{"message": {"refusal": "no"}}]}):
+            with self.subTest(payload=payload), self.assertRaises(SchemaError):
+                self.complete(lambda request: httpx.Response(200, json=payload))
+
+    def test_prose_and_fences_are_not_structured_outputs(self):
+        for raw in ('Ответ: {"stay":false,"say":"Пока"}', '```json\n{"stay":false,"say":"Пока"}\n```'):
+            with self.subTest(raw=raw), self.assertRaises(SchemaError):
+                parse_content(raw)
+
+    def test_nested_types_required_fields_and_nonfinite_numbers(self):
+        for data, key in (({"people": [None]}, "crowd"),
+                          ({"say": "Да", "action": "serve", "item_id": "espresso"}, "staff"),
+                          ({"traffic": float("nan"), "newcomers": .3, "curve": [], "why": "", "buzz": ""}, "district"),
+                          ({"stay": False, "say": "Пока", "extra": 1}, "queue"),
+                          ({"score": True, "issues": []}, "critic")):
+            with self.subTest(key=key), self.assertRaises(SchemaError):
+                check_schema(data, SCHEMAS[key]["schema"])
 
 
 if __name__ == "__main__":

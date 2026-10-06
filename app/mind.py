@@ -62,6 +62,19 @@ class Mind:
         self.watch: list[dict] = []
         self.tasks: set[asyncio.Task] = set()
 
+    async def reset(self) -> None:
+        """Старые ответы не должны менять новый мир после сброса."""
+        tasks = list(self.tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.tasks.clear()
+        self.cache.clear()
+        self.watch.clear()
+        self.busy = False
+        self.last = 0.0
+
     @property
     def city(self):
         return self.engine.city
@@ -81,6 +94,7 @@ class Mind:
                 self.busy = True
                 self._spawn(self._follow(item))
                 return
+        self.cache = {key: value for key, value in self.cache.items() if city.t < value[0]}
         now = time.time()
         if now - self.last < CALL_EVERY:
             return
@@ -101,7 +115,8 @@ class Mind:
                 if ped.id not in city.peds:
                     continue
                 percept = city.percept(ped, row["alerts"])
-                key = (tuple(sorted(e["kind"] for e in percept["near"])), ped.trait, bool(percept["facts"]))
+                key = (ped.id, json.dumps({k: v for k, v in percept.items() if k != "time"},
+                                          ensure_ascii=False, sort_keys=True))
                 cached = self.cache.get(key)
                 if cached and city.t < cached[0]:
                     city.intent(ped.id, cached[1])
@@ -111,8 +126,9 @@ class Mind:
                 return
             user = f"Сейчас {asked[0][2]['time']}.\n" + json.dumps({"people": [row[2] for row in asked]}, ensure_ascii=False)
             began = time.perf_counter()
-            data = await self.engine.llm.complete(
-                agent="crowd", schema_key="crowd", system=load_system("crowd"), user=user, visit_id=None, week_day=None)
+            async with self.engine._thinking():
+                data = await self.engine.llm.complete(
+                    agent="crowd", schema_key="crowd", system=load_system("crowd"), user=user, visit_id=None, week_day=None)
             by_id = {row[0]: row for row in asked}
             done = 0
             for item in data.get("people", []):
@@ -144,18 +160,26 @@ class Mind:
                         f"{'непроходим' if e.blocks else 'проходим'}, вред {e.hazard:.1f}, ещё {left} мин")
         return "На карте сейчас:\n" + ("\n".join(rows) if rows else "ничего необычного.")
 
+    def _places_note(self) -> str:
+        city = self.city
+        return "Заведения мира (id, название, дверь): " + json.dumps([
+            {"id": row["id"], "name": row.get("name", row["id"]),
+             "door": list(city.doors.get(row["id"], (0, 0)))}
+            for row in city.places.values()
+        ], ensure_ascii=False)
+
     async def adjudicate(self, text: str, headline: str = "", story: str = "") -> list[dict]:
         """Событие → патч мира. Возвращает применённые операции; сбой модели оставляет мир как был."""
         city = self.city
         if city is None:
             return []
         state = db.run()
-        brief = (f"{MAP_NOTE}\nСейчас {state['clock']}, день {state['day']}.\n{self._objects_note()}\n"
+        places_note = self._places_note()
+        brief = (f"{MAP_NOTE}\n{places_note}\nСейчас {state['clock']}, день {state['day']}.\n{self._objects_note()}\n"
                  f"Событие: {headline}. {story}\nВброс владельца: {text or 'нет'}")
         try:
             data = await self.engine._speak("Ведущий мира размечает карту", "adjudicator", "adjudicator", brief, None, False)
         except (TransportError, SchemaError) as exc:
-            log.event("world.fail", "warn", reason=str(exc))
             self.engine._ev("world.fail", "warn", reason=str(exc))
             db.set_run(phase="", active_agent="")
             return []
@@ -176,7 +200,8 @@ class Mind:
             if not any(e.src == item["src"] for e in city.ents.values()):
                 item["left"] = 0
                 return
-            brief = (f"{MAP_NOTE}\nСейчас {db.run()['clock']}. Прошло около 25 минут после события «{item['text']}».\n"
+            places_note = self._places_note()
+            brief = (f"{MAP_NOTE}\n{places_note}\nСейчас {db.run()['clock']}. Прошло около 25 минут после события «{item['text']}».\n"
                      f"{self._objects_note()}\nЧто изменилось? Верни только изменения (modify, remove, новые spawn, fact).")
             data = await self.engine._speak("Ведущий мира смотрит, что стало", "adjudicator", "adjudicator", brief, None, False)
             applied, notes = city.apply_patch(patch_ops(data.get("ops") or []), source=item["src"])

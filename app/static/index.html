@@ -3,57 +3,53 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Кофейня на углу</title>
+  <title>Loom</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Literata:opsz,wght@7..72,520;7..72,680&family=Unbounded:wght@500;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=Geologica:wght@500;600;700;800&family=Literata:opsz,wght@7..72,520;7..72,680&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
   <header class="hud">
-    <p class="place"><svg class="cup" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h12v5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V8zm12 1.5h1.5a2.5 2.5 0 0 1 0 5H16M8 3.5v2M12 3.5v2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="place">Loom</span></p>
-    <p class="badge" id="daylabel">День не начат</p>
-    <div class="clockbox">
-      <h1 id="clockline">00:00:00</h1>
-      <p id="pace" class="pace">час за 30 с</p>
-    </div>
-    <p class="viewers" id="viewers" title="Сколько вкладок смотрят эту симуляцию"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5C6.5 5 2.5 9.2 1.5 12c1 2.800 5 7 10.500 7s9.500-4.200 10.500-7C21.500 9.200 17.500 5 12 5zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm0-6.200a2.200 2.200 0 1 0 0 4.400 2.200 2.200 0 0 0 0-4.400z" fill="currentColor"/></svg><b id="viewers-n">1</b></p>
-    <p id="status" class="status" role="status">стоит</p>
-    <button type="button" id="sound" class="icon" aria-pressed="false" title="Звук: колокольчик, касса">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z" fill="currentColor"/><path class="waves" d="M15.5 9a4 4 0 0 1 0 6M18 6.5a8 8 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-    </button>
-    <div class="dayprog"><i id="dayfill"></i><div id="dots" class="dayline"></div></div>
+    <section class="isle isle-clock" aria-label="Время">
+      <p class="brand"><svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M4 9c4-3 8-3 12 0s8 3 12 0M4 16c4-3 8-3 12 0s8 3 12 0M4 23c4-3 8-3 12 0s8 3 12 0" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg><span id="place">Loom</span></p>
+      <div class="timebox">
+        <h1 id="clockline">00:00:00</h1>
+        <p class="sub"><b id="daylabel">День не начат</b><span id="pace" class="pace">час за 30 с</span></p>
+      </div>
+    </section>
+    <section class="isle isle-status" aria-label="Состояние">
+      <p class="viewers" id="viewers" title="Сколько вкладок смотрят эту симуляцию"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5C6.5 5 2.5 9.2 1.5 12c1 2.800 5 7 10.500 7s9.500-4.200 10.500-7C21.500 9.200 17.500 5 12 5zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8zm0-6.200a2.200 2.200 0 1 0 0 4.400 2.200 2.200 0 0 0 0-4.400z" fill="currentColor"/></svg><b id="viewers-n">1</b></p>
+      <p id="status" class="status" role="status">стоит</p>
+      <button type="button" id="sound" class="icon" aria-pressed="false" title="Звук: колокольчик, касса">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z" fill="currentColor"/><path class="waves" d="M15.5 9a4 4 0 0 1 0 6M18 6.5a8 8 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <button type="button" id="open-settings" class="icon" title="Модель и прогон">
+        <i id="llm-dot" class="dot"></i>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.800a3.200 3.200 0 1 0 0 6.400 3.200 3.200 0 0 0 0-6.400zM19.400 13.200a7.600 7.600 0 0 0 0-2.400l2-1.500-2-3.500-2.300.9a7.500 7.500 0 0 0-2.100-1.200L14.700 3h-4l-.3 2.500a7.500 7.500 0 0 0-2.100 1.200l-2.300-.9-2 3.500 2 1.500a7.600 7.600 0 0 0 0 2.400l-2 1.500 2 3.500 2.300-.9c.6.500 1.300.9 2.100 1.200l.3 2.500h4l.3-2.500c.8-.3 1.500-.7 2.100-1.200l2.300.9 2-3.500z" fill="none" stroke="currentColor" stroke-width="1.600" stroke-linejoin="round"/></svg>
+      </button>
+    </section>
   </header>
   <p id="banner" class="banner" hidden></p>
   <p id="link" class="banner" role="alert" hidden>Нет связи с сервером. Страница переподключится сама.</p>
-  <div class="play">
-    <nav class="dock" aria-label="Управление">
-      <div class="cmds">
-        <button type="button" id="auto" class="cmd primary">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z" fill="currentColor"/></svg>
-          <span>Пустить время<small>дни идут сами</small></span>
-        </button>
-        <button type="button" id="day" class="cmd">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="currentColor"/></svg>
-          <span>До конца суток<small>доиграть день</small></span>
-        </button>
-        <button type="button" id="pause" class="cmd">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg>
-          <span>Пауза<small>заморозить часы</small></span>
-        </button>
-      </div>
-      <form class="director" id="director" autocomplete="off">
-        <label for="director-text">Режиссёр</label>
-        <div class="director-row">
-          <input id="director-text" maxlength="200" placeholder="например: сломалась кофемашина">
-          <button type="submit" id="director-go">Вбросить</button>
-        </div>
-        <p class="hint" id="director-note" hidden></p>
-      </form>
-      <div class="foot">
-        <button type="button" id="reset" class="ghost">Заново</button>
-      </div>
+  <footer class="deck">
+    <nav class="transport" aria-label="Управление временем">
+      <button type="button" id="auto" class="cmd primary" title="Пустить время: дни идут сами (пробел)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z" fill="currentColor"/></svg>
+        <span>Пустить время</span>
+      </button>
+      <button type="button" id="pause" class="cmd" title="Заморозить часы (пробел)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></svg>
+        <span>Пауза</span>
+      </button>
+      <button type="button" id="day" class="cmd" title="Доиграть день и встать в полночь">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="currentColor"/></svg>
+        <span>До конца суток</span>
+      </button>
     </nav>
+    <div class="loom" id="loom" aria-label="Сутки: нити визитов по заведениям"></div>
+  </footer>
+  <div class="play">
     <div class="world" id="world">
       <div id="room" role="img" aria-label="Изометрический мир кофейни"></div>
       <div id="actor-access" class="actor-access-list" aria-label="Гости в зале"></div>
@@ -88,52 +84,99 @@
       <section id="chats" class="drawer" hidden></section>
     </div>
   </div>
-  <details class="monitor" id="monitor-box">
-    <summary><i id="llm-dot" class="dot"></i>Что думает модель<span id="llm-brief"></span></summary>
-    <div class="monitor-body">
-    <form id="settings" class="settings">
+  <dialog id="settings-dlg" class="sheet" aria-labelledby="settings-title">
+    <form id="settings" class="settings" method="dialog">
+      <header class="sheet-head">
+        <h2 id="settings-title">Модель и прогон</h2>
+        <button type="button" class="x" id="close-settings" aria-label="Закрыть">×</button>
+      </header>
+      <p class="health" id="llm-brief"></p>
       <label>Адрес
-        <input id="llm-url" name="base_url" autocomplete="off">
+        <input id="llm-url" name="base_url" autocomplete="off" autofocus>
       </label>
-      <label>Модель
-        <input id="llm-model" name="model" autocomplete="off">
-      </label>
-      <label>Таймаут, с
-        <input id="llm-timeout" name="timeout" type="number" min="5" max="180">
-      </label>
+      <div class="pair">
+        <label>Модель
+          <input id="llm-model" name="model" autocomplete="off">
+        </label>
+        <label>Таймаут, с
+          <input id="llm-timeout" name="timeout" type="number" min="5" max="180">
+        </label>
+      </div>
       <label>Ключ API (пусто — не менять)
         <input id="llm-key" name="api_key" type="password" autocomplete="new-password" placeholder="не задан">
       </label>
-      <label>Критик: адрес (пусто — как у основной)
-        <input id="critic-url" name="critic_base_url" autocomplete="off" placeholder="http://…/v1">
-      </label>
-      <label>Критик: модель
-        <input id="critic-model" name="critic_model" autocomplete="off" placeholder="как у основной">
-      </label>
-      <button type="submit">Сохранить</button>
+      <div class="pair">
+        <label>Критик: адрес
+          <input id="critic-url" name="critic_base_url" autocomplete="off" placeholder="как у основной">
+        </label>
+        <label>Критик: модель
+          <input id="critic-model" name="critic_model" autocomplete="off" placeholder="как у основной">
+        </label>
+      </div>
+      <footer class="sheet-foot">
+        <button type="button" id="reset" class="danger">Начать заново</button>
+        <button type="submit" class="save">Сохранить</button>
+      </footer>
     </form>
-    <div class="filters">
-      <label>Роль
-        <select id="agent-filter">
-          <option value="">Все</option>
-          <option value="client">Гость</option>
-          <option value="staff">Бариста</option>
-          <option value="manager">Управляющий</option>
-          <option value="verdict">Вердикт гостя</option>
-          <option value="critic">Критик</option>
-          <option value="queue">Очередь</option>
-          <option value="narrator">Рассказчик</option>
-          <option value="world">Действия мира</option>
-          <option value="director">Режиссёр</option>
-        </select>
-      </label>
-      <label class="check"><input id="err-only" type="checkbox"> Только сбои</label>
-    </div>
-    <div id="monitor"></div>
-    </div>
-  </details>
+  </dialog>
   <script src="/static/vendor/phaser-3.90.0.min.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/art/palette.js"></script>
+  <script src="/static/art/util.js"></script>
+  <script src="/static/art/layout.js"></script>
+  <script src="/static/art/light.js"></script>
+  <script src="/static/art/ground/paving.js"></script>
+  <script src="/static/art/ground/lawn.js"></script>
+  <script src="/static/art/ground/zebra.js"></script>
+  <script src="/static/art/ground/roads.js"></script>
+  <script src="/static/art/ground/land.js"></script>
+  <script src="/static/art/buildings/list.js"></script>
+  <script src="/static/art/buildings/houses.js"></script>
+  <script src="/static/art/nature/trees.js"></script>
+  <script src="/static/art/nature/bushes.js"></script>
+  <script src="/static/art/nature/rocks.js"></script>
+  <script src="/static/art/nature/beds.js"></script>
+  <script src="/static/art/nature/birds.js"></script>
+  <script src="/static/art/props/shadowdot.js"></script>
+  <script src="/static/art/props/bin.js"></script>
+  <script src="/static/art/props/hydrant.js"></script>
+  <script src="/static/art/props/sign.js"></script>
+  <script src="/static/art/props/lamp.js"></script>
+  <script src="/static/art/props/bench.js"></script>
+  <script src="/static/art/props/trafficlight.js"></script>
+  <script src="/static/art/people/legs.js"></script>
+  <script src="/static/art/people/hair.js"></script>
+  <script src="/static/art/people/face.js"></script>
+  <script src="/static/art/people/clothes.js"></script>
+  <script src="/static/art/people/figure.js"></script>
+  <script src="/static/art/vehicles/kinds.js"></script>
+  <script src="/static/art/vehicles/model.js"></script>
+  <script src="/static/art/vehicles/cars.js"></script>
+  <script src="/static/art/vehicles/brake.js"></script>
+  <script src="/static/art/depth.js"></script>
+  <script src="/static/art/rooms/cafe/floor.js"></script>
+  <script src="/static/art/rooms/cafe/walls.js"></script>
+  <script src="/static/art/rooms/cafe/window.js"></script>
+  <script src="/static/art/rooms/cafe/decor.js"></script>
+  <script src="/static/art/rooms/cafe/rug.js"></script>
+  <script src="/static/art/rooms/cafe/plant.js"></script>
+  <script src="/static/art/rooms/cafe/desk.js"></script>
+  <script src="/static/art/rooms/cafe/counter.js"></script>
+  <script src="/static/art/rooms/cafe/table.js"></script>
+  <script src="/static/art/rooms/cafe/chair.js"></script>
+  <script src="/static/art/rooms/cafe/shadows.js"></script>
+  <script src="/static/art/rooms/cafe/theme.js"></script>
+  <script src="/static/art/rooms/datacenter/floor.js"></script>
+  <script src="/static/art/rooms/datacenter/walls.js"></script>
+  <script src="/static/art/rooms/datacenter/window.js"></script>
+  <script src="/static/art/rooms/datacenter/decor.js"></script>
+  <script src="/static/art/rooms/datacenter/rug.js"></script>
+  <script src="/static/art/rooms/datacenter/counter.js"></script>
+  <script src="/static/art/rooms/datacenter/rack.js"></script>
+  <script src="/static/art/rooms/datacenter/desk.js"></script>
+  <script src="/static/art/rooms/datacenter/cooler.js"></script>
+  <script src="/static/art/rooms/datacenter/shadows.js"></script>
+  <script src="/static/art/rooms/datacenter/theme.js"></script>
   <script src="/static/rooms.js"></script>
   <script src="/static/world.js"></script>
   <script src="/static/traffic.js"></script>

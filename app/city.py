@@ -290,6 +290,7 @@ class City:
     def __init__(self, seed: int | None = None):
         self.rng = random.Random(seed)
         self.doors = {key: (ox + ALLEY_X + 2.9, oy + DOOR_Y) for key, (ox, oy) in ROOM_AT.items()}
+        self.entries = dict(ENTRIES)
         self.graph = Graph({})
         self.t = 0.0                  # абсолютная минута города
         self.day: int | None = None
@@ -325,12 +326,33 @@ class City:
         self.log.append((level, event, fields))
 
     def set_places(self, rows: list[dict]) -> None:
-        self.places = {row["id"]: row for row in rows}
+        previous = self.places
+        self.places = {row["id"]: {**row, **({"status": previous[row["id"]]["status"]} if row["id"] in previous and "status" in previous[row["id"]] else {})} for row in rows}
+        from app.venue_api import PLOTS, external
+        for row in rows:
+            if row.get("type") != "custom":
+                continue
+            extra = external(row["id"])
+            if not extra:
+                continue
+            plot = PLOTS[extra["plot_id"]]
+            ox, oy = plot["ox"], plot["oy"]
+            entries = ((ox + ALLEY_X, oy + ENTRY_SOUTH_Y), (ox + ALLEY_X, oy + ENTRY_NORTH_Y))
+            self.entries[row["id"]] = entries
+            self.doors[row["id"]] = (row["door_x"], row["door_y"])
+            self.graph._edge(entries[0], entries[1], {})
+            near = min(entries, key=lambda p: math.dist(p, plot["junction"]))
+            self.graph._edge(near, tuple(plot["junction"]), {})
 
     def place_open(self, place_id: str, minute: float | None = None) -> bool:
         row = self.places.get(place_id)
         if row is None:
             return True
+        if row.get("type") == "custom":
+            from app.venue_api import external
+            ext = external(place_id)
+            if ext and ext["status"] == "offline":
+                return False
         m = self.minute if minute is None else minute
         return row.get("status", "open") == "open" and row["open_min"] <= m < row["close_min"]
 
@@ -775,7 +797,7 @@ class City:
         kind = goal.get("kind")
         if kind == "visit" and not goal.get("arrived"):
             place = goal["place"]
-            entries = ENTRIES.get(place)
+            entries = self.entries.get(place)
             side = 0 if entries and _key((ped.x, ped.y)) == _key(entries[0]) else 1
             if ped.client_id:
                 # человек у двери: дальше визит ведёт движок, он же вернёт человека в город командой `release`
@@ -855,7 +877,7 @@ class City:
         if where in self.places and self.t >= ped.until:
             self.inside.get(where, {}).pop(ped.id, None)
             ped.state = "walk"
-            node = ENTRIES[where][ped.goal.get("side", 0)]
+            node = self.entries[where][ped.goal.get("side", 0)]
             ped.x, ped.y = node
             ped.prev = _key(node)
             self._depart(ped)
@@ -944,7 +966,7 @@ class City:
         for ped in self.peds.values():
             if ped.client_id == client_id:
                 return {"ok": False, "why": "уже в пути"}
-        if place not in ENTRIES:
+        if place not in self.entries:
             return {"ok": False, "why": "нет входа"}
         ped = self._new_ped(name, home=home, client_id=client_id)
         ped.goal = {"kind": "visit", "place": place, "linger": 5.0}
@@ -981,7 +1003,7 @@ class City:
 
     def _entry_node(self, place: str, start: tuple | None = None) -> tuple | None:
         """Вход, до которого ближе: юг или север. Без стартовой точки — южный."""
-        entries = ENTRIES.get(place)
+        entries = self.entries.get(place)
         if not entries:
             return None
         if start is None:
@@ -1002,7 +1024,7 @@ class City:
             if ped.client_id == client_id and ped.state == "inside" and ped.goal.get("arrived"):
                 place = ped.goal.get("place")
                 self.inside.get(place, {}).pop(ped.id, None)
-                node = ENTRIES[place][ped.goal.get("side", 0)]
+                node = self.entries[place][ped.goal.get("side", 0)]
                 ped.x, ped.y = node
                 ped.prev = _key(node)
                 self._depart(ped)

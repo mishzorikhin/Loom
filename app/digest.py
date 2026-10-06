@@ -148,6 +148,9 @@ def _places(day: int) -> dict:
             if place and place["type"] == "datacenter":
                 util = gpu_utilization(db.load_rows(day), day, DC_CAPACITY) if day else 0.0
                 row["gpu"] = {"util": round(util, 3), "status": gpu_status(util)}
+            if place and place["type"] == "custom":
+                from app.venue_api import public_place
+                row["controller"] = public_place(place)["controller"]
             out[place_id] = row
     return out
 

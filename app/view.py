@@ -6,6 +6,7 @@ import app.db as db
 from app.config import CLOSE_MIN, DAY_END, DAY_START, LIKES_WINDOW, OPEN_MIN
 from app.rules import advance_minutes, effect_label, format_clock, gpu_status, gpu_utilization, popularity
 from app.venues import DC_CAPACITY, VENUES, venue_of
+from app.venue_api import public_place, PLOTS
 
 
 def _stats(day: int | None) -> dict:
@@ -286,7 +287,11 @@ CITY = None  # город, который ведёт движок: `set_city` в
 def _closed_by_event(place_id: str) -> bool:
     """Заведение закрыто патчем мира (событие), а не часами работы."""
     row = CITY.places.get(place_id) if CITY is not None else None
-    return bool(row) and row.get("status") == "closed"
+    if bool(row) and row.get("status") == "closed":
+        return True
+    from app.venue_api import external
+    ext = external(place_id)
+    return bool(ext) and ext["status"] == "offline"
 
 
 def set_city(city) -> None:
@@ -370,10 +375,11 @@ def snapshot() -> dict:
             "critic_model": db.setting("critic_model"),
         },
         "places": [
-            {**place, "open": place["open_min"] <= live < place["close_min"] and _closed_by_event(place["id"]) is False}
+            {**public_place(place), "open": place["open_min"] <= live < place["close_min"] and _closed_by_event(place["id"]) is False}
             for place in db.places()
         ],
         "place_views": place_views,
+        "building_plots": list(PLOTS.values()),
         "city": {"roster": CITY.roster(), "frame": CITY.frame()} if CITY is not None else None,
         "staff": cafe["staff"],
         "days": cafe["days"],

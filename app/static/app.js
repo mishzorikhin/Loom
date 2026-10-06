@@ -39,16 +39,13 @@ const STATUS = {
   paused: "пауза",
   error: "ошибка модели",
 };
-const AGENT = { client: "гость", staff: "бариста", manager: "управляющий", verdict: "вердикт гостя", critic: "критик", queue: "очередь", narrator: "рассказчик", director: "режиссёр", world: "действия мира" };
 
-const openCalls = new Set();
 const openWeeks = new Set();
 const visitCache = new Map();
-const callCache = new Map();
 const loadingVisits = new Set();
 let selectedGuest = null;
 let focusVisit = null;
-let pinnedCall = null;
+let errorShown = "";
 const seen = new Map();
 let seenDay = null;
 let firstLoad = true;
@@ -129,7 +126,6 @@ async function applySnapshot(data) {
         selectedGuest = null;
       }
       if (snap.current_visit) visitCache.set(snap.current_visit.id, snap.current_visit);
-      await refreshOpen();
       render();
       detectEvents();
     }
@@ -219,15 +215,8 @@ function setLink(ok) {
   if (banner) banner.hidden = ok;
 }
 
-async function refreshOpen() {
-  await Promise.all([...openCalls].map(async (id) => {
-    const res = await fetch(`/api/llm/${id}`);
-    if (res.ok) callCache.set(id, await res.json());
-  }));
-}
-
 function formatClock(mins) {
-  const total = Math.max(0, Math.floor(mins * 60));
+  const total = Math.max(0, Math.floor(mins * 60)) % 86400;
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
@@ -241,7 +230,7 @@ function liveMinutes() {
     const speed = Number(snap.run.speed || 1);
     mins += ((performance.now() - snapAt) / 1000) * (snap.run.thinking ? Math.min(speed, 1) : speed);
   }
-  return mins;
+  return Math.min(mins, Number(snap.run.day_end) || 1440);
 }
 
 function render() {
@@ -264,6 +253,7 @@ function renderAll() {
     day.textContent = `День ${run.day}`;
     clock.textContent = formatClock(liveMinutes());
   }
+  document.body.dataset.state = run.status;
   const seconds = 60 / Number(run.speed || 1);
   document.getElementById("pace").textContent = seconds === 60 ? "час за минуту" : `час за ${seconds} с`;
   paintDay();
@@ -281,12 +271,15 @@ function renderAll() {
   document.getElementById("day").disabled = busy;
   document.getElementById("auto").disabled = busy;
   document.getElementById("pause").disabled = !busy;
-  const box = document.getElementById("monitor-box");
-  if (run.status === "error") box.open = true;
+  const dlg = document.getElementById("settings-dlg");
+  if (run.status === "error" && !dlg.open && errorShown !== run.message) {
+    errorShown = run.message;
+    dlg.showModal();
+  }
   fillSettings();
   const health = snap.llm_health || {};
   document.getElementById("llm-dot").className = `dot ${health.ok ? "ok" : "bad"}`;
-  document.getElementById("llm-brief").textContent = `${snap.llm.model} · ${health.ok ? "на связи" : "недоступна"}`;
+  document.getElementById("llm-brief").textContent = healthLine();
   renderWorld();
   renderEventbar();
   renderReviews();
@@ -297,16 +290,17 @@ function renderAll() {
   renderDayCard();
   renderChats();
   renderManager();
-  renderMonitor();
 }
 
 function paintDay() {
-  const span = snap.run.day_end - snap.run.day_start;
-  const done = snap.run.day ? (liveMinutes() - snap.run.day_start) / span : 0;
-  const bar = document.querySelector(".dayprog");
-  bar.style.setProperty("--open-from", `${(((snap.run.open_min - snap.run.day_start) / span) * 100).toFixed(2)}%`);
-  bar.style.setProperty("--open-to", `${(((snap.run.close_min - snap.run.day_start) / span) * 100).toFixed(2)}%`);
-  document.getElementById("dayfill").style.width = `${Math.min(100, Math.max(0, done * 100)).toFixed(1)}%`;
+  const run = snap.run;
+  const plane = document.querySelector("#loom .loom-plane");
+  if (!plane) return;
+  const span = run.day_end - run.day_start;
+  const done = run.day ? Math.min(1, Math.max(0, (liveMinutes() - run.day_start) / span)) : 0;
+  plane.style.setProperty("--done", `${(done * 100).toFixed(2)}%`);
+  plane.classList.toggle("over", Boolean(run.day) && done >= 1);
+  plane.classList.toggle("idle", !run.day);
 }
 
 function fillSettings() {
@@ -457,8 +451,8 @@ const STAFF_LOOK = {
 const COUNTER_GUEST = [4.05, 2.5];
 const MGR_AT = [1.5, 2.9];
 const MGR_LOOK = { shirt: "#5b4b8a", hair: "#8d8d8d", skin: SKIN[0], pants: "#2f3a45", style: 0 };
-const TABLES = [{ x: 1.3, y: 4.5 }, { x: 6.0, y: 4.9 }, { x: 3.4, y: 6.1 }];
-const SEATS = [
+let TABLES = [{ x: 1.3, y: 4.5 }, { x: 6.0, y: 4.9 }, { x: 3.4, y: 6.1 }];
+let SEATS = [
   ...TABLES.map((t) => ({ at: [t.x + 0.55, t.y - 0.5], face: "n" })),
   ...TABLES.map((t) => ({ at: [t.x - 0.5, t.y + 0.55], face: "w" })),
 ];
@@ -922,7 +916,7 @@ const STREET_FROM = [[ALLEY_X, 9.6], [ALLEY_X, 2.2]];
 const streetIn = (side) => [STREET_FROM[side], [ALLEY_X, DOOR_OUT[1]], DOOR_OUT];
 const streetOut = (side) => [DOOR_OUT, [ALLEY_X, DOOR_OUT[1]], STREET_FROM[side]];
 const DEFAULT_STAY = 20;
-const SEAT_ORDER = SEATS.map((_, index) => index);
+let SEAT_ORDER = SEATS.map((_, index) => index);
 
 function routeLen(pts) {
   let sum = 0;
@@ -944,9 +938,17 @@ function along(pts, p) {
   return pts[pts.length - 1];
 }
 
-const routeIn = (side) => [...streetIn(side), DOOR, [DOOR[0], LANE], [COUNTER_GUEST[0], LANE], COUNTER_GUEST];
-const routeToSeat = (seat) => [COUNTER_GUEST, [COUNTER_GUEST[0], LANE], [seat[0], LANE], seat];
-const routeOut = (from, side) => [from, [from[0], LANE], [DOOR[0], LANE], DOOR, ...streetOut(side)];
+const routeIn = (side) => ROOM?.layout ? [...streetIn(side), ...ROOM.layout.paths["door:counter"]] : [...streetIn(side), DOOR, [DOOR[0], LANE], [COUNTER_GUEST[0], LANE], COUNTER_GUEST];
+const routeToSeat = (seat) => ROOM?.layout ? ROOM.layout.paths[`counter:s${SEATS.findIndex(s => s.at === seat)}`] : [COUNTER_GUEST, [COUNTER_GUEST[0], LANE], [seat[0], LANE], seat];
+const routeOut = (from, side) => {
+  if (ROOM?.layout) {
+    const i = SEATS.findIndex(s => s.at === from);
+    const q = QUEUE.findIndex(p => Math.hypot(p[0]-from[0], p[1]-from[1]) < 0.02);
+    const key = i >= 0 ? `s${i}:door` : q >= 0 ? `q${q}:door` : "counter:door";
+    return [...ROOM.layout.paths[key], ...streetOut(side)];
+  }
+  return [from, [from[0], LANE], [DOOR[0], LANE], DOOR, ...streetOut(side)];
+};
 const clockMinutes = (text) => {
   const [h, m] = String(text || "08:00").split(":").map(Number);
   return h * 60 + (m || 0);
@@ -955,8 +957,8 @@ const clockMinutes = (text) => {
 const QUEUE_Y = 3.05;
 const QUEUE = [[3.3, QUEUE_Y], [2.5, QUEUE_Y], [1.7, QUEUE_Y], [0.9, QUEUE_Y], [0.35, QUEUE_Y]];
 const QUEUE_STEP = 0.6;
-const routeToQueue = (side, spot) => [...streetIn(side), DOOR, [DOOR[0], QUEUE_Y], spot];
-const routeQueueToCounter = (from) => [from, [from[0], 2.5], COUNTER_GUEST];
+const routeToQueue = (side, spot) => ROOM?.layout ? [...streetIn(side), ...ROOM.layout.paths[`door:q${QUEUE.indexOf(spot)}`]] : [...streetIn(side), DOOR, [DOOR[0], QUEUE_Y], spot];
+const routeQueueToCounter = (from) => ROOM?.layout ? ROOM.layout.paths[`q${QUEUE.indexOf(from)}:counter`] : [from, [from[0], 2.5], COUNTER_GUEST];
 
 function queuePos(idx) {
   const last = QUEUE.length - 1;
@@ -1323,7 +1325,10 @@ function drawRoom(room, t, running, rows) {
     setPose(actor, st.pose, st.carry);
     const z = st.pose === "sit" ? SEAT_Z : 0;
     const [sx, sy] = iso(st.x, st.y, z);
-    actor.g.setPosition(sx, sy).setScale(facing(actor, sx) * SCALE, SCALE);
+    // Сидящий смотрит на стол: у стула «n» лицом влево-вниз, у стула «w» вправо-вниз
+    const face = facing(actor, sx);
+    const turn = st.pose === "sit" ? (SEATS[st.seat]?.face === "n" ? -1 : 1) : face;
+    actor.g.setPosition(sx, sy).setScale(turn * SCALE, SCALE);
     actor.g.setAlpha(st.alpha);
     const on = selectedGuest === life.clientId;
     actor.ring.setVisible(on);
@@ -1386,6 +1391,8 @@ function followBubble(at) {
 
 function renderWorld() {
   if (!scene) buildScene();
+  if (!scene) return;
+  syncExternalRooms();
   ROOMS.forEach((room) => withRoom(room, () => {
     lives = snap.run.day ? buildLives(roomData(room).day_visits || []) : [];
   }));
@@ -1464,7 +1471,6 @@ function bubbleAt(at, who, body, o = {}) {
   const attrs = [
     o.follow ? "data-follow" : "",
     o.visitId ? `data-visit="${o.visitId}"` : "",
-    o.agent ? `data-agent="${o.agent}" title="Открыть этот ход в мониторе модели"` : "",
   ].join(" ");
   return `<div class="speech${o.cls ? ` ${o.cls}` : ""}" ${attrs} style="left:${left.toFixed(0)}px;top:${pos.top.toFixed(0)}px"><b>${esc(who)}</b>${body}${o.note || ""}</div>`;
 }
@@ -1517,6 +1523,7 @@ const PLACE_TABS = {
   cafe: [["menu", "Меню"], ["ribbon", "Лента дня"], ["reviews", "Отзывы"], ["notes", "Записки"]],
   neuraldeep: [["menu", "Прайс"], ["ribbon", "Лента дня"], ["reviews", "Отзывы"], ["notes", "Записки"], ["info", "Статус"]],
 };
+const CUSTOM_TABS = [["menu", "Каталог"], ["ribbon", "Лента дня"], ["reviews", "Отзывы"], ["notes", "Записки"], ["info", "Агент"]];
 const PLACE_INFO_TABS = [["info", "Обзор"]];
 /* Над какой точкой здания висит вывеска: x, y, высота. */
 const SIGN_AT = { cafe: [4, 0, 98], neuraldeep: [4, 0, 120] };
@@ -1533,7 +1540,7 @@ function placeOf(id) {
 
 function placeIsOpen(place) {
   const mins = liveMinutes();
-  return Boolean(snap.run.day) && mins >= place.open_min && mins < place.close_min;
+  return Boolean(snap.run.day) && place.open !== false && place.controller?.status !== "offline" && mins >= place.open_min && mins < place.close_min;
 }
 
 function hoursText(place) {
@@ -1543,7 +1550,7 @@ function hoursText(place) {
 function openPlace(id) {
   placeId = id;
   if (id) focusPlace(id);
-  const tabs = id ? (PLACE_TABS[id] || PLACE_INFO_TABS) : [];
+  const tabs = id ? (placeOf(id)?.type === "custom" ? CUSTOM_TABS : PLACE_TABS[id] || PLACE_INFO_TABS) : [];
   if (id && !tabs.some(([key]) => key === placeTab)) placeTab = tabs[0][0];
   if (snap) {
     renderBoard();
@@ -1595,6 +1602,7 @@ function placeSigns() {
   const root = document.getElementById("signs");
   if (!snap || !root) return;
   const places = snap.places || [];
+  root.querySelectorAll("[data-place]").forEach(btn => { if (!places.some(p => p.id === btn.dataset.place)) btn.remove(); });
   places.forEach((place) => {
     let btn = root.querySelector(`[data-place="${place.id}"]`);
     if (!btn) {
@@ -1634,7 +1642,7 @@ function renderPlace() {
   const open = placeIsOpen(place);
   const parts = [`<span class="st ${open ? "on" : "off"}">${open ? "Открыто" : "Закрыто"}</span>`, hoursText(place)];
   const data = placeData(place.id);
-  if (PLACE_TABS[place.id]) {
+  if (PLACE_TABS[place.id] || place.type === "custom") {
     const today = data.summary && data.summary.today;
     const stats = data.reviews || { avg: null, count: 0 };
     parts.push(`касса ${rub(today ? today.revenue : 0)}`);
@@ -1642,7 +1650,7 @@ function renderPlace() {
     if (data.gpu) parts.push(`GPU ${Math.round(data.gpu.util * 100)}% · ${data.gpu.status}`);
   }
   document.getElementById("pc-meta").innerHTML = parts.join(" · ");
-  const tabs = PLACE_TABS[place.id] || PLACE_INFO_TABS;
+  const tabs = place.type === "custom" ? CUSTOM_TABS : PLACE_TABS[place.id] || PLACE_INFO_TABS;
   if (!tabs.some(([key]) => key === placeTab)) placeTab = tabs[0][0];
   const weeks = data.weeks || [];
   const unread = PLACE_TABS[place.id] && weeks.length && weeks[0].id > noteSeen(place.id) && placeTab !== "notes";
@@ -1654,6 +1662,12 @@ function renderPlace() {
 
 function placeInfo(place, data) {
   const note = place.note ? `<p>${esc(place.note)}</p>` : "";
+  if (place.controller) {
+    const c = place.controller;
+    return `${note}<p>Управление: ${esc(c.model)} · ${c.mode === "agent" ? "внешний агент" : "API модели"}</p>
+      <p>${c.status === "offline" ? "Приём приостановлен" : "Контроллер включён"}${c.last_seen ? ` · последний ответ/опрос ${esc(new Date(c.last_seen * 1000).toLocaleTimeString())}` : " · ждём подключения"}</p>
+      ${c.error ? `<p>${esc(c.error)}</p>` : ""}`;
+  }
   if (!data.gpu) return note;
   const util = Math.min(1.2, data.gpu.util);
   const klass = data.gpu.util >= 0.9 ? "bad" : data.gpu.util >= 0.85 ? "warn" : "ok";
@@ -1737,62 +1751,10 @@ function renderManager() {
   }).join("");
 }
 
-function renderMonitor() {
-  const agent = document.getElementById("agent-filter").value;
-  const errors = document.getElementById("err-only").checked;
-  const calls = snap.llm_calls.filter((call) => {
-    if (agent && call.agent !== agent) return false;
-    if (errors && !call.error) return false;
-    return true;
-  });
-  const root = document.getElementById("monitor");
-  const health = `<p class="meta">${esc(healthLine())}</p>`;
-  if (!calls.length) {
-    root.innerHTML = `${health}<p class="quiet-note">Запросов к модели ещё нет.</p>`;
-    return;
-  }
-  root.innerHTML = health + calls.map((call) => {
-    const where = call.visit_id ? `визит ${call.visit_id}` : `неделя, день ${call.week_day || ""}`;
-    const mark = call.error ? `<span class="err">${esc(call.error)}</span>` : "разобран";
-    const retry = call.attempt > 1 ? ", повтор" : "";
-    const open = openCalls.has(call.id) ? renderCallDetail(callCache.get(call.id)) : "";
-    return `<article class="call${pinnedCall === call.id ? " pinned" : ""}">
-      <button type="button" data-call="${call.id}">${esc(call.created_at)} · ${esc(AGENT[call.agent] || call.agent)} · ${esc(where)} · ${call.latency_ms ?? "—"} мс · ${mark}${retry}</button>
-      ${open}
-    </article>`;
-  }).join("");
-}
-
-function renderCallDetail(call) {
-  if (!call) return `<div class="detail">Открываю запрос…</div>`;
-  return `<div class="detail">
-    <p class="meta">${esc(call.model)}, попытка ${call.attempt}</p>
-    <h3>Системное описание</h3><pre>${esc(call.system_prompt)}</pre>
-    <h3>Промпт хода</h3><pre>${esc(call.user_prompt)}</pre>
-    <h3>Сырой ответ</h3><pre>${esc(call.raw_content || "пусто")}</pre>
-    <h3>Разбор</h3><pre>${esc(call.parsed_json || "не разобран")}</pre>
-    ${call.error ? `<p class="err">${esc(call.error)}</p>` : ""}
-  </div>`;
-}
-
 function pick(visitId, clientId) {
   selectedGuest = clientId;
   focusVisit = visitId;
   if (snap) render();
-}
-
-async function openCallFor(visitId, agent) {
-  const call = lastCall(visitId, agent);
-  if (!call) return;
-  document.getElementById("monitor-box").open = true;
-  document.getElementById("agent-filter").value = "";
-  document.getElementById("err-only").checked = false;
-  openCalls.add(call.id);
-  pinnedCall = call.id;
-  await refreshOpen();
-  render();
-  const btn = document.querySelector(`[data-call="${call.id}"]`);
-  if (btn) btn.scrollIntoView({ block: "center" });
 }
 
 const OUTCOME = { served: "ok", refused: "no", failed: "bad", open: "live", waiting: "wait", left: "left" };
@@ -1873,19 +1835,61 @@ function renderRibbon() {
   list.scrollTop = top;
 }
 
+const LOOM_COLORS = { cafe: "#ff8a4c", neuraldeep: "#3fd0e0" };
+const LOOM_SPARE = ["#b48cff", "#8bd450", "#ff6fa8"];
+
+function loomColor(place, index) {
+  return LOOM_COLORS[place.id] || LOOM_SPARE[index % LOOM_SPARE.length];
+}
+
+/* Нити визитов: каждая — отрезок от прихода до ухода на дорожке своего заведения. Пересекающиеся нити ложатся на соседние волокна. */
+function loomThreads(visits, span, start) {
+  const ends = [];
+  return visits.map((v) => {
+    const at = v.start_min ?? clockMinutes(v.clock);
+    const stay = v.stay_min || v.serve_min || 8;
+    const to = Math.max(v.end_min ?? at + stay, at + 4);
+    let lane = ends.findIndex((end) => end <= at);
+    if (lane < 0) lane = ends.length < 3 ? ends.length : 2;
+    ends[lane] = to;
+    const left = ((at - start) / span) * 100;
+    const width = Math.max(0.35, ((to - at) / span) * 100);
+    return { v, lane, left, width };
+  });
+}
+
+/* Шкала дня показывается только у открытого заведения: у сотни заведений общая шкала была бы кашей. */
 function renderDots() {
-  const root = document.getElementById("dots");
-  if (!snap.run.day) {
-    root.innerHTML = "";
+  const root = document.getElementById("loom");
+  const deck = document.querySelector(".deck");
+  const run = snap.run;
+  const place = placeId && placeOf(placeId);
+  deck.classList.toggle("compact", !place);
+  if (place) document.documentElement.style.removeProperty("--bottom");
+  else document.documentElement.style.setProperty("--bottom", "84px");
+  root.hidden = !place;
+  if (!place) {
+    root.dataset.key = "";
     return;
   }
-  const span = snap.run.day_end - snap.run.day_start;
-  root.innerHTML = (snap.day_visits || []).map((v) => {
-    const at = v.start_min ?? clockMinutes(v.clock);
-    const left = (((at - snap.run.day_start) / span) * 100).toFixed(2);
+  const span = run.day_end - run.day_start;
+  const visits = run.day ? placeData(place.id).day_visits || [] : [];
+  const index = (snap.places || []).findIndex((row) => row.id === place.id);
+  const key = JSON.stringify([run.day, place.id, visits.map((v) => [v.id, v.status, v.end_min])]);
+  if (root.dataset.key === key) return;
+  root.dataset.key = key;
+  const pct = (min) => `${(((min - run.day_start) / span) * 100).toFixed(3)}%`;
+  const color = loomColor(place, Math.max(0, index));
+  const threads = loomThreads(visits, span, run.day_start);
+  const bars = threads.map(({ v, lane, left, width }) => {
     const title = `${v.clock} ${v.client_name}: ${outcomeText(v)}`;
-    return `<button type="button" class="dot-mark ${OUTCOME[v.status] || "ok"}" style="left:${left}%" title="${esc(title)}" data-pick="${v.id}" data-who="${v.client_id}"></button>`;
+    return `<button type="button" class="thread ${OUTCOME[v.status] || "ok"}" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%;--lane:${lane}" title="${esc(title)}" data-pick="${v.id}" data-who="${v.client_id}" data-place="${place.id}"></button>`;
   }).join("");
+  const open = `<i class="loom-open" style="left:${pct(place.open_min)};right:calc(100% - ${pct(place.close_min)})"></i>`;
+  const hours = [0, 3, 6, 9, 12, 15, 18, 21, 24].map((h) => `<li style="left:${pct(h * 60)}">${String(h).padStart(2, "0")}</li>`).join("");
+  root.style.setProperty("--venue", color);
+  root.innerHTML = `<p class="loom-name"><i></i>${esc(place.name)}</p><div class="loom-plane"><div class="loom-row">${open}${bars}</div><b class="loom-now"></b><ol class="loom-hours" aria-hidden="true">${hours}</ol></div>`;
+  paintDay();
 }
 
 function daysChart(today) {
@@ -2030,34 +2034,19 @@ document.getElementById("sound").onclick = () => {
   paintSound();
 };
 paintSound();
-document.getElementById("director").onsubmit = async (event) => {
-  event.preventDefault();
-  const input = document.getElementById("director-text");
-  const button = document.getElementById("director-go");
-  const note = document.getElementById("director-note");
-  const text = input.value.trim();
-  if (text.length < 2) return;
-  button.disabled = true;
-  button.textContent = "Думает…";
-  note.hidden = true;
-  const result = await rpc("director", { text });
-  if (result.ok) {
-    input.value = "";
-  } else {
-    note.textContent = result.error || "Не получилось";
-    note.hidden = false;
-  }
-  button.disabled = false;
-  button.textContent = "Вбросить";
-};
 document.getElementById("day").onclick = () => control("day");
 document.getElementById("auto").onclick = () => control("auto");
 document.getElementById("pause").onclick = () => control("pause");
 document.getElementById("reset").onclick = () => {
-  if (confirm("Начать прогон заново? Разговоры этой смены сотрутся.")) control("reset");
+  if (confirm("Начать прогон заново? Разговоры этой смены сотрутся.")) {
+    settingsDlg.close();
+    control("reset");
+  }
 };
-document.getElementById("agent-filter").onchange = () => { if (snap) render(); };
-document.getElementById("err-only").onchange = () => { if (snap) render(); };
+const settingsDlg = document.getElementById("settings-dlg");
+document.getElementById("open-settings").onclick = () => settingsDlg.showModal();
+document.getElementById("close-settings").onclick = () => settingsDlg.close();
+settingsDlg.addEventListener("click", (event) => { if (event.target === settingsDlg) settingsDlg.close(); });
 document.getElementById("settings").onsubmit = async (event) => {
   event.preventDefault();
   const body = {
@@ -2070,6 +2059,7 @@ document.getElementById("settings").onsubmit = async (event) => {
   };
   await rpc("settings", body);
   document.getElementById("llm-key").value = "";
+  settingsDlg.close();
 };
 
 document.body.addEventListener("toggle", (event) => {
@@ -2157,11 +2147,6 @@ document.body.addEventListener("click", (event) => {
     renderDayCard();
     return;
   }
-  const bubble = event.target.closest(".speech[data-agent]");
-  if (bubble) {
-    openCallFor(Number(bubble.dataset.visit), bubble.dataset.agent);
-    return;
-  }
   const pickBtn = event.target.closest("[data-pick]");
   if (pickBtn) {
     pick(Number(pickBtn.dataset.pick), Number(pickBtn.dataset.who));
@@ -2174,12 +2159,6 @@ document.body.addEventListener("click", (event) => {
     render();
     return;
   }
-  const callBtn = event.target.closest("[data-call]");
-  if (!callBtn) return;
-  const id = Number(callBtn.dataset.call);
-  if (openCalls.has(id)) openCalls.delete(id);
-  else openCalls.add(id);
-  refreshOpen().then(() => { if (snap) render(); });
 });
 
 window.addEventListener("resize", () => { if (snap) renderFloat(); });

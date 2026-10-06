@@ -21,6 +21,8 @@ from app.view import set_city, snapshot
 
 app = FastAPI(title="Loom")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+from app.venue_api import router as venue_router
+app.include_router(venue_router)
 
 
 @app.middleware("http")

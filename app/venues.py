@@ -5,7 +5,7 @@
 правок остаются общими в `rules.py`.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass(frozen=True)
@@ -134,7 +134,13 @@ DATACENTER = Venue(
     stay=False,
 )
 
-VENUES = {"cafe": CAFE, "datacenter": DATACENTER}
+CUSTOM = replace(CAFE, kind="custom", prompts="custom", where="в заведении", this_place="в этом заведении",
+                 staff_word="сотрудник", staff_of="сотрудника", staff_acc="сотрудником", staff_dat="сотруднику",
+                 staff_look="Сотрудник ({name}) выглядел так: {mood}.",
+                 served_phrase="Тебе выдали", leave_phrase="Ты вышел из заведения.",
+                 queue_phrase="Сотрудник занят другим гостем.", voices={}, stay=True)
+
+VENUES = {"cafe": CAFE, "datacenter": DATACENTER, "custom": CUSTOM}
 
 
 def venue_of(kind: str | None) -> Venue:

@@ -1,5 +1,6 @@
 import copy
 import json
+import math
 import time
 from datetime import datetime
 
@@ -26,7 +27,7 @@ class SchemaError(Exception):
 
 
 TEMPERATURE = {"adjudicator": 0.3, "crowd": 0.6, "client": 0.7, "verdict": 0.7, "staff": 0.4, "manager": 0.3, "critic": 0.1, "queue": 0.6, "narrator": 0.9, "director": 0.4, "world": 0.2, "district": 0.5, "demographer": 0.9}
-MAX_TOKENS = {"adjudicator": 900, "crowd": 700, "manager": 420, "critic": 560, "queue": 120, "narrator": 520, "director": 520, "world": 1000, "district": 380, "demographer": 900, "verdict": 240}
+MAX_TOKENS = {"adjudicator": 900, "crowd": 700, "manager": 420, "critic": 560, "queue": 120, "narrator": 520, "director": 520, "world": 1000, "district": 380, "demographer": 1800, "verdict": 240}
 
 
 def load_system(name: str, venue: str = "") -> str:
@@ -37,23 +38,11 @@ def load_system(name: str, venue: str = "") -> str:
 
 
 def parse_content(raw: str) -> dict:
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:]
-        text = text.strip()
+    """Structured Outputs: целиком один JSON-объект, без извлечения из произвольного текста."""
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start < 0 or end <= start:
-            raise SchemaError("Ответ не JSON", raw)
-        try:
-            data = json.loads(text[start : end + 1])
-        except json.JSONDecodeError as exc:
-            raise SchemaError("Ответ не JSON", raw) from exc
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise SchemaError("Ответ не JSON", raw) from exc
     if not isinstance(data, dict):
         raise SchemaError("Ответ не объект", raw)
     return data
@@ -405,6 +394,58 @@ SCHEMAS["world"] = copy.deepcopy(SCHEMAS["world"])
 SCHEMAS["world"]["schema"]["properties"]["changes"]["items"]["properties"]["op"] = {"type": "string"}
 
 
+def check_schema(data, schema: dict, path: str = "$", raw: str = "") -> None:
+    """Проверка подмножества JSON Schema, используемого в SCHEMAS, без приведения типов."""
+    kind = schema["type"]
+    valid = {
+        "object": isinstance(data, dict),
+        "array": isinstance(data, list),
+        "string": isinstance(data, str),
+        "boolean": type(data) is bool,
+        "integer": type(data) is int or (type(data) is float and math.isfinite(data) and data.is_integer()),
+        "number": type(data) is int or (type(data) is float and math.isfinite(data)),
+    }[kind]
+    if not valid:
+        raise SchemaError(f"{path}: ожидается {kind}", raw)
+    if "enum" in schema and data not in schema["enum"]:
+        raise SchemaError(f"{path}: значение вне списка", raw)
+    if kind == "object":
+        for key in schema.get("required", []):
+            if key not in data:
+                raise SchemaError(f"{path}: нет поля {key}", raw)
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False and data.keys() - properties.keys():
+            raise SchemaError(f"{path}: лишние поля", raw)
+        for key, value in data.items():
+            if key in properties:
+                check_schema(value, properties[key], f"{path}.{key}", raw)
+    elif kind == "array":
+        for index, value in enumerate(data):
+            check_schema(value, schema["items"], f"{path}[{index}]", raw)
+
+
+def completion_content(payload) -> tuple[str, dict, str]:
+    """Не доверяем форме ответа OpenAI-совместимого шлюза."""
+    if not isinstance(payload, dict):
+        raise SchemaError("Ответ API не объект", "")
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise SchemaError("В ответе API нет choices", "")
+    choice = choices[0]
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise SchemaError("В ответе API нет message", "")
+    raw = message.get("content") or ""
+    if not isinstance(raw, str):
+        raise SchemaError("content не строка", "")
+    usage = payload.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    reason = choice.get("finish_reason") or ""
+    if message.get("refusal"):
+        raise SchemaError("Модель отказалась отвечать по схеме", raw)
+    return raw, usage, reason
+
+
 class LLM:
     def __init__(self):
         self.client = httpx.AsyncClient(limits=httpx.Limits(keepalive_expiry=3))
@@ -471,6 +512,13 @@ class LLM:
     ) -> dict:
         base, model, timeout = self._settings(target)
         schema = SCHEMAS[schema_key]
+        from app.venue_api import external
+        ext = external()
+        if ext:
+            project = json.loads(ext["project_json"])
+            system += "\nТы находишься в пользовательском заведении: " + project["name"] + ". " + project["description"]
+            if agent in ("staff", "manager"):
+                return await self._external_complete(ext, agent, schema_key, system, user, visit_id, week_day, final_staff, echo_of)
         if cassette.replaying():
             return self._replayed(agent, schema_key, system, user, visit_id, week_day, final_staff, echo_of, model)
         messages = [
@@ -510,9 +558,14 @@ class LLM:
                 if response.status_code >= 400:
                     raise TransportError(f"HTTP {response.status_code}: {response.text[:500]}")
                 payload = response.json()
-                usage = payload.get("usage") or {}
-                raw = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                raw, usage, reason = completion_content(payload)
+                if reason == "length":
+                    body["max_tokens"] = min(body["max_tokens"] * 2, 4096)
+                    raise SchemaError("Ответ обрезан по лимиту токенов", raw)
+                if reason not in ("", "stop"):
+                    raise SchemaError("Ответ не завершён обычным сообщением", raw)
                 data = parse_content(raw)
+                check_schema(data, schema["schema"], raw=raw)
                 parsed = validate(agent, data, final_staff=final_staff)
                 problem = style_problem(agent, parsed, echo_of)
                 if problem and attempt == 1:
@@ -546,6 +599,78 @@ class LLM:
             return parsed
         raise SchemaError(last_error, raw)
 
+    async def _external_complete(self, ext, agent, schema_key, system, user, visit_id, week_day, final_staff, echo_of):
+        """Тот же контракт и монитор, но отдельный контроллер. Его сбой не ставит мир на паузу."""
+        from app.venue_api import agent_request
+        config = json.loads(ext["controller_json"])
+        project = json.loads(ext["project_json"])
+        model = config["model"]
+        place_id = ext["place_id"]
+        if agent == "manager":
+            system += "\nХарактер управляющего: " + project["manager_personality"]
+        else:
+            roster = "\n".join(p["name"] + ": " + p["personality"] for p in project["staff"])
+            system += "\nХарактеры сотрудников:\n" + roster
+        system += "\nОписание интерьера:\n" + json.dumps(project["interior"]["objects"], ensure_ascii=False)
+        if cassette.replaying():
+            return self._replayed(agent, schema_key, system, user, visit_id, week_day, final_staff, echo_of, model)
+        last_error, raw = "", ""
+        for attempt in (1, 2):
+            started = time.perf_counter()
+            prompt_user = user + ("\nИсправь предыдущий ответ: " + last_error if attempt > 1 else "")
+            usage = {}
+            log.event("llm.start", agent=agent, place=place_id, visit_id=visit_id, week_day=week_day, attempt=attempt, model=model)
+            try:
+                if ext["status"] == "offline":
+                    raise TimeoutError("Контроллер заведения отключён; включите его через API status")
+                schema = SCHEMAS[schema_key]
+                if config["mode"] == "agent":
+                    data = await agent_request(place_id, {
+                        "role": agent, "schema_key": schema_key, "system": system, "user": prompt_user,
+                        "response_schema": schema["schema"], "final_staff": final_staff,
+                        "visit_id": visit_id, "week_day": week_day, "attempt": attempt,
+                    }, config["timeout"])
+                    raw = json.dumps(data, ensure_ascii=False)
+                else:
+                    response = await self.client.post(config["base_url"].rstrip("/") + "/chat/completions", json={
+                        "model": model, "messages": [{"role":"system","content":system},{"role":"user","content":prompt_user}],
+                        "temperature": TEMPERATURE[agent], "max_tokens": 2048 if attempt == 1 else 4096,
+                        "response_format": {"type":"json_schema","json_schema":{"name":schema["name"],"strict":True,"schema":schema["schema"]}},
+                    }, headers={"Authorization":"Bearer " + config["api_key"]} if config["api_key"] else {}, timeout=config["timeout"])
+                    if response.status_code >= 400:
+                        raise TimeoutError(f"Внешняя модель: HTTP {response.status_code}")
+                    try:
+                        payload = response.json()
+                    except ValueError as exc:
+                        raise SchemaError("Внешнее API вернуло не JSON", "") from exc
+                    raw, usage, reason = completion_content(payload)
+                    if reason not in ("", "stop"):
+                        raise SchemaError("Внешний ответ не завершён: " + str(reason), raw)
+                    data = parse_content(raw)
+                check_schema(data, schema["schema"], raw=raw)
+                parsed = validate(agent, data, final_staff=final_staff)
+                problem = style_problem(agent, parsed, echo_of)
+                if problem and attempt == 1:
+                    raise SchemaError(problem, raw)
+            except (TimeoutError, httpx.HTTPError) as exc:
+                # Не сохраняем HTTP body / адрес / ключ подключения в ошибках.
+                last_error = str(exc) if isinstance(exc, TimeoutError) else "Нет связи с внешней моделью"
+                db.execute("UPDATE external_venues SET status='offline',last_error=? WHERE place_id=?", (last_error, place_id))
+                self._log(agent, visit_id, week_day, model, int((time.perf_counter()-started)*1000), {}, system, prompt_user, raw, None, last_error, attempt)
+                log.event("venue.offline", "warn", place=place_id, reason=last_error)
+                raise SchemaError(last_error, raw) from exc
+            except SchemaError as exc:
+                last_error = exc.message
+                self._log(agent, visit_id, week_day, model, int((time.perf_counter()-started)*1000), usage, system, prompt_user, raw, None, last_error, attempt)
+                if attempt == 2:
+                    raise
+                continue
+            db.execute("UPDATE external_venues SET last_seen=?,last_error='' WHERE place_id=?", (time.time(),place_id))
+            self._log(agent, visit_id, week_day, model, int((time.perf_counter()-started)*1000), usage, system, prompt_user, raw, json.dumps(parsed,ensure_ascii=False), "", attempt)
+            cassette.record(agent,schema_key,system,user,parsed,visit_id,model)
+            return parsed
+        raise SchemaError(last_error, raw)
+
     def _replayed(self, agent, schema_key, system, user, visit_id, week_day, final_staff, echo_of, model) -> dict:
         """Проигрывание кассеты: ответ берётся из записи, запроса к модели нет. Он проходит ту же проверку, что живой."""
         found = cassette.replay(agent, system, user)
@@ -555,6 +680,7 @@ class LLM:
         data, drift = found
         if drift:
             log.event("cassette.drift", "warn", agent=agent, visit_id=visit_id)
+        check_schema(data, SCHEMAS[schema_key]["schema"], raw=json.dumps(data, ensure_ascii=False))
         parsed = validate(agent, dict(data), final_staff=final_staff)
         self._log(agent, visit_id, week_day, "кассета", 0, {}, system, user, json.dumps(data, ensure_ascii=False),
                   json.dumps(parsed, ensure_ascii=False), "", 1)
@@ -562,6 +688,7 @@ class LLM:
 
     def _log(self, agent, visit_id, week_day, model, latency, usage, system, user, raw, parsed, error, attempt):
         details = usage.get("prompt_tokens_details") or {}
+        details = details if isinstance(details, dict) else {}
         log.event(
             "llm.call", "warn" if error else "info", agent=agent, visit_id=visit_id, week_day=week_day,
             attempt=attempt, ms=latency, ptok=usage.get("prompt_tokens"), ctok=usage.get("completion_tokens"),

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "night_tea",
+  "name": "Ночная чайная",
+  "description": "Тихая чайная с травяными сборами и тёмным деревом. Здесь можно спокойно посидеть после прогулки.",
+  "plot_id": "west_north",
+  "open_min": 0,
+  "close_min": 1440,
+  "interior": {
+    "floor_color": "#83654c",
+    "wall_color": "#365d52",
+    "accent_color": "#c59b55",
+    "objects": [
+      {"id": "table_a", "kind": "table", "x": 2.5, "y": 5.0, "color": "#916742"},
+      {"id": "seat_a", "kind": "chair", "x": 2.5, "y": 4.0, "color": "#557c64", "face": "n"},
+      {"id": "table_b", "kind": "table", "x": 6.0, "y": 6.2, "color": "#916742"},
+      {"id": "seat_b", "kind": "chair", "x": 5.0, "y": 6.2, "color": "#557c64", "face": "w"},
+      {"id": "tea_machine", "kind": "equipment", "x": 6.7, "y": 4.0, "color": "#a9b0ac"},
+      {"id": "plant", "kind": "plant", "x": 7.3, "y": 7.3, "color": "#52764a"}
+    ]
+  },
+  "items": [
+    {"id": "herbal", "name": "Травяной чай", "price": 180, "minutes": 3},
+    {"id": "black", "name": "Чёрный чай", "price": 150, "minutes": 2}
+  ],
+  "staff": [{"id": "tea_master", "name": "Лев", "personality": "Спокойный чайный мастер. Коротко объясняет различия сборов, уважает спешащих гостей."}],
+  "manager_personality": "Бережёт атмосферу чайной, учитывает просьбы гостей и разумно меняет ассортимент.",
+  "controller": {"mode": "agent", "model": "my-local-model", "timeout": 10}
+}

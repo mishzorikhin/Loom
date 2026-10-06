@@ -255,6 +255,8 @@ class Engine:
             except asyncio.CancelledError:
                 pass
         self.task = None
+        if self.mind is not None:
+            await self.mind.reset()
         db.reset_world()
         self._trips.clear()
         self._leaving.clear()
@@ -403,6 +405,10 @@ class Engine:
         """Разыграть минуту следующего прихода. Расписания на день нет: в базе всегда не больше одного будущего прихода."""
         venue = venue_now()
         place = db.place(db.current_place())
+        if place["type"] == "custom":
+            from app.venue_api import external
+            if external()["status"] == "offline":
+                return
         done = db.one("SELECT COUNT(*) AS n FROM visits WHERE day = ? AND place_id = ?", (day, place["id"]))["n"]
         if done + 1 >= venue.max_visits:
             self._ev("arrival.none", reason="потолок гостей за день", visits=done)
@@ -489,7 +495,7 @@ class Engine:
         """Когда гость выйдет из заведения и пойдёт дальше по городу: после визита, сидения и выхода к двери."""
         if self.city is None:
             return
-        walk_out = 1.6 if venue_now().kind == "cafe" else 0.6
+        walk_out = 0.6 if venue_now().kind == "datacenter" else 1.6
         day = db.run()["day"]
         at = day * 1440 + (end_min if end_min is not None else self._live_minutes()) + (stay or 0) + walk_out
         self._leaving.append({"client": client_id, "at": at})
@@ -845,7 +851,7 @@ class Engine:
         )
         try:
             venue = venue_now()
-            key = "demographer" if venue.kind == "cafe" else f"demographer_{venue.kind}"
+            key = "demographer_datacenter" if venue.kind == "datacenter" else "demographer"
             data = await self._speak("Демограф придумывает людей", "demographer", key, prompt, None, False)
         except (TransportError, SchemaError) as exc:
             self._ev("demographer.fail", "warn", reason=str(exc))
@@ -1276,7 +1282,7 @@ class Engine:
             return True
         catalog = {item["id"]: dict(item) for item in db.items()}
         venue = venue_now()
-        applied, notes = apply_changes(catalog, data["changes"], prefix="new" if venue.kind == "cafe" else f"{db.current_place()[:2]}",
+        applied, notes = apply_changes(catalog, data["changes"], prefix="new" if venue.kind == "cafe" else f"{db.current_place()}:new" if venue.kind == "custom" else f"{db.current_place()[:2]}",
                                        price_max=venue.price_max)
         for change in applied:
             if change["op"] == "add_item":

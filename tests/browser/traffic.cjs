@@ -3,7 +3,11 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const context = vm.createContext({ module: { exports: {} } });
-vm.runInContext(fs.readFileSync('app/static/world.js', 'utf8'), context);
+// Рисунки лежат в app/static/art/: берём те же теги, что и страница, в том же порядке (кроме Phaser, app.js и сцены).
+const html = fs.readFileSync('app/static/index.html', 'utf8');
+for (const [, src] of html.matchAll(/<script src="\/static\/([^"]+)"/g)) {
+  if (src.startsWith('art/') || src === 'world.js') vm.runInContext(fs.readFileSync('app/static/' + src, 'utf8'), context);
+}
 vm.runInContext(fs.readFileSync('app/static/traffic.js', 'utf8'), context);
 const T = context.module.exports;
 const specs = vm.runInContext('CARS.map(c => ({ ...c, length: CAR_KINDS[c.kind].L, maxSpeed: c.kind === "van" ? 4.4 : 5.2 }))', context);
