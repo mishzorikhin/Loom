@@ -395,7 +395,7 @@ const GradeShader = {
     time: { value: 0 },
     warmth: { value: 0.04 },
     contrast: { value: 1.06 },
-    saturation: { value: 1.1 },
+    saturation: { value: 1.03 },
     vignette: { value: 0.22 },
     grain: { value: 0.018 },
   },

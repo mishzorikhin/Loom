@@ -64,8 +64,9 @@ function flat(gs: THREE.BufferGeometry[]) {
 function carParts(sp: Spec) {
   const { L, W, cab } = sp;
   const body: THREE.BufferGeometry[] = [];
-  const low = new RoundedBoxGeometry(L, cab[2] - 0.22, W, 2, 0.16);
-  low.translate(0, 0.22 + (cab[2] - 0.22) / 2, 0);
+  // кузов приподнят над дорогой, под ним видны колёса
+  const low = new RoundedBoxGeometry(L, cab[2] - 0.3, W, 2, 0.16);
+  low.translate(0, 0.3 + (cab[2] - 0.3) / 2, 0);
   body.push(low);
   // крыша — цвет кузова
   const roofL = L * cab[1] * (sp.bus ? 1 : 0.86);
@@ -81,8 +82,22 @@ function carParts(sp: Spec) {
   const glass = new THREE.BoxGeometry(L * cab[1], cab[3], W * 0.84);
   glass.translate(L * (cab[0] + cab[1] / 2), cab[2] + cab[3] / 2, 0);
   // колёса и днище тёмной полосой
-  const under = new THREE.BoxGeometry(L * 0.92, 0.32, W * 0.94);
-  under.translate(0, 0.2, 0);
+  // днище и четыре колеса (у автобуса колёса больше и дальше от краёв)
+  const wr = sp.bus ? 0.5 : 0.34;
+  const parts: THREE.BufferGeometry[] = [];
+  const base = new THREE.BoxGeometry(L * 0.86, 0.2, W * 0.84);
+  base.translate(0, 0.32, 0);
+  parts.push(base);
+  const ax = L / 2 - (sp.bus ? 2.3 : Math.max(0.75, L * 0.17));
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      const w = new THREE.CylinderGeometry(wr, wr, 0.24, 14);
+      w.rotateX(Math.PI / 2);
+      w.translate(sx * ax, wr, sz * (W / 2 - 0.16));
+      parts.push(w);
+    }
+  }
+  const under = flat(parts);
   const lights = (front: boolean) => {
     const g: THREE.BufferGeometry[] = [];
     for (const side of [-1, 1]) {
@@ -136,7 +151,7 @@ export class Actors {
     this.next = net.links.map((l) => l.next ?? []);
     this.edges = net.sw_edges.map((e) => new Path(e.pts));
     const bodyMat = new THREE.MeshPhysicalMaterial({ color: "#ffffff", roughness: 0.38, metalness: 0.3, clearcoat: 0.8, clearcoatRoughness: 0.12 });
-    const glassMat = new THREE.MeshStandardMaterial({ color: "#2a3846", roughness: 0.06, metalness: 0.85, envMapIntensity: 1.4 });
+    const glassMat = new THREE.MeshStandardMaterial({ color: "#5d7387", roughness: 0.1, metalness: 0.5, envMapIntensity: 3.2 });
     const underMat = new THREE.MeshStandardMaterial({ color: "#15171b", roughness: 0.9 });
     this.headMat = new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false });
     const tailMat = new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false });

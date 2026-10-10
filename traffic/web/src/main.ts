@@ -6,6 +6,7 @@ import * as THREE from "three";
 import type { FrameMsg, HelloMsg, NetMsg, SimEvent } from "./types";
 import { Stage } from "./world/stage";
 import { buildRoads } from "./world/roads";
+import { Terrain } from "./world/terrain";
 import { City } from "./world/city";
 import { Signals } from "./world/signals";
 import { Actors } from "./world/actors";
@@ -106,6 +107,7 @@ function onNet(m: NetMsg) {
   }
   world = new THREE.Group();
   const roads = buildRoads(net.render, m.scenery.ground);
+  world.add(new Terrain(net.render.bbox, roads.rays).group);
   pick = roads.pick;
   world.add(roads.group);
   const city = new City(m.scenery);
