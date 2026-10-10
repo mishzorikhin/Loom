@@ -34,7 +34,9 @@
 - Начинать с `traffic/README.md`; устройство и замысел — `traffic/docs/design.md`, формат мира — `traffic/docs/world-format.md`, страница и графика (Three.js) — `traffic/docs/graphics.md`.
 - Запуск: `cd traffic && python3 -m tsim.server --port 8500` после `cd web && npm install && npm run build`; разработка страницы — `npm run dev` (порт 5180).
 - Тесты: `cd traffic && python3 -m unittest discover -s tests`; типы страницы: `cd traffic/web && npm run typecheck`. Тесты Loom из корня (`-s tests`) их не запускают.
-- Сравнение контроллеров без картинки: `python3 -m tsim.run`; среда обучения — `tsim/env.py`.
+- Сравнение контроллеров без картинки: `python3 -m tsim.run`; среда обучения — `tsim/env.py`, как её использовать (наблюдение, действие, награда, метрики) — `traffic/docs/training.md`, прогон политик — `python3 -m tsim.rollout`. Меняешь среду (`env.py`: наблюдение, награду, маску, параметры) — обнови `training.md` в том же шаге.
+- Вход графовой модели: `TrafficEnv.graph()` — направленные связи с признаками дорог; `graph_observation()` после `reset()` — numpy-снимок всех узлов и рёбер, маски признаков, внимания и действий. Порядок узлов — `env.agents`; `True` в маске внимания разрешает связь. Ширина наблюдений по-прежнему зависит от мира, граф сам не обеспечивает перенос модели между мирами.
+- Район из OpenStreetMap: `python3 -m tsim.osm` (`fetch`, `convert`), мир `perm`; данные © участники OpenStreetMap, ODbL.
 - `traffic/web/dist` и `node_modules` в git не входят.
 
 ## Журнал для агента

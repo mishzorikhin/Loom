@@ -2,7 +2,7 @@ import copy
 import unittest
 
 from tsim.compiler import CompileError, compile_world, load_world, net_json
-from tsim.generators import corridor, grid
+from tsim.generators import corridor, district, grid
 from tsim.worlds import ROOT
 
 CROSS = load_world(ROOT / "examples" / "cross.json")
@@ -61,13 +61,29 @@ class CompilerTest(unittest.TestCase):
         self.assertTrue(any(m.startswith("roads/rn/forward/0/width") for m in e.exception.errors))
 
     def test_generators_and_auto_signals(self):
-        for w in (grid(3, 3), grid(2, 2), corridor(4)):
+        for w in (grid(3, 3), grid(2, 2), corridor(4), district()):
             net = compile_world(w)
             for j in net.junctions.values():
                 self.assertGreaterEqual(len(j.phases), 2)
                 # каждое движение в какой-то группе
                 for ci in j.links:
                     self.assertTrue(net.links[ci].group)
+
+    def test_osm_district_compiles(self):
+        net = compile_world(load_world(ROOT / "examples" / "perm_mira.json"))
+        self.assertGreaterEqual(len([j for j in net.junctions.values() if j.kind == "signal"]), 8)
+
+    def test_osm_convert_synthetic(self):
+        from tsim.osm import convert
+        # крест из двух двусторонних улиц: узлы в градусах около (0, 0)
+        k = 1 / 111320
+        pts = {1: (-300, 0), 2: (0, 0), 3: (300, 0), 4: (0, -300), 5: (0, 300)}
+        els = [{"type": "node", "id": i, "lat": y / 110574, "lon": x * k} for i, (x, y) in pts.items()]
+        els += [{"type": "way", "id": 10, "nodes": [1, 2, 3], "tags": {"highway": "secondary", "lanes": "4"}},
+                {"type": "way", "id": 11, "nodes": [4, 2, 5], "tags": {"highway": "tertiary"}}]
+        w = convert({"elements": els}, (0.0, 0.0), (-400, -400, 400, 400), "тест")
+        self.assertEqual(sorted(n["kind"] for n in w["nodes"].values()), ["boundary"] * 4 + ["signal"])
+        compile_world(w)
 
     def test_net_json_roundtrip(self):
         js = net_json(compile_world(CROSS))
