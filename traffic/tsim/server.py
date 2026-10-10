@@ -8,7 +8,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
+import sys
 import time
+import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -30,6 +33,14 @@ SPEEDS = [0.5, 1, 2, 5, 10, 20, 40]
 
 def dumps(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def num(msg: dict, key: str, default: float, lo: float, hi: float) -> float:
+    """Число из команды в пределах [lo, hi]; NaN и бесконечность — ошибка."""
+    v = float(msg.get(key, default))
+    if not math.isfinite(v):
+        raise ValueError(f"«{key}» не число")
+    return min(max(v, lo), hi)
 
 
 class Runner:
@@ -107,7 +118,7 @@ class Runner:
         elif cmd == "pause":
             self.running = False
         elif cmd == "speed":
-            self.speed = float(min(max(float(msg.get("value", 1)), 0.25), 60))
+            self.speed = num(msg, "value", 1, 0.25, 60)
         elif cmd == "load":
             name = str(msg.get("world"))
             # со страницы — только готовые миры и тот, что задан при запуске
@@ -124,15 +135,15 @@ class Runner:
                 s["controller"] = name
                 self.sim.controller = CONTROLLERS[name]()
         elif cmd == "demand":
-            s["demand"] = float(min(max(float(msg.get("value", 1)), 0), 3))
+            s["demand"] = num(msg, "value", 1, 0, 3)
             self.sim.demand.scale = s["demand"]
             self.sim.reschedule()
         elif cmd == "peds":
-            s["peds"] = float(min(max(float(msg.get("value", 1)), 0), 3))
+            s["peds"] = num(msg, "value", 1, 0, 3)
             self.sim.demand.peds_scale = s["peds"]
             self.sim.reschedule()
         elif cmd == "timing":
-            s["timing"] = float(min(max(float(msg.get("value", 1)), 0), 2))
+            s["timing"] = num(msg, "value", 1, 0, 2)
             self.sim.set_timing_scale(s["timing"])
         elif cmd == "block_box":
             s["block_box"] = bool(msg.get("value"))
@@ -171,10 +182,17 @@ class Runner:
                 self.budget += real_dt * self.speed
                 t0 = time.perf_counter()
                 steps = 0
-                while self.budget >= DT and time.perf_counter() - t0 < 0.03:
-                    self.sim.step()
-                    self.budget -= DT
-                    steps += 1
+                try:
+                    while self.budget >= DT and time.perf_counter() - t0 < 0.03:
+                        self.sim.step()
+                        self.budget -= DT
+                        steps += 1
+                except Exception as e:
+                    traceback.print_exc(file=sys.stderr)
+                    self.running = False
+                    self.budget = 0.0
+                    await self.broadcast(dumps({"type": "error", "message": f"Сбой симуляции, пауза: {e!r}"}))
+                    await self.broadcast(self.hello())
                 if self.budget > DT * 4:
                     self.budget = DT * 4   # не успеваем: эффективная скорость ниже заданной
                 sim_acc += steps * DT
@@ -220,10 +238,13 @@ def create_app(world: str = "cross", seed: int = 1) -> FastAPI:
             await ws.send_text(runner.net_msg)
             await ws.send_text(runner.full_frame())
             while True:
-                msg = json.loads(await ws.receive_text())
                 try:
+                    msg = json.loads(await ws.receive_text())
+                    if not isinstance(msg, dict):
+                        raise ValueError("команда должна быть объектом JSON")
+                    before = dict(runner.settings)
                     res = runner.command(msg)
-                except (ValueError, KeyError, TypeError, CompileError) as e:
+                except (ValueError, KeyError, TypeError, AttributeError, CompileError) as e:
                     await ws.send_text(dumps({"type": "error", "message": str(e)}))
                     continue
                 if res == "net":
@@ -231,8 +252,11 @@ def create_app(world: str = "cross", seed: int = 1) -> FastAPI:
                     await runner.broadcast(runner.net_msg)
                     await runner.broadcast(runner.full_frame())
                 elif res == "reset":
+                    if runner.settings != before:
+                        await runner.broadcast(runner.hello())
                     await runner.broadcast(runner.full_frame())
-                else:
+                elif runner.settings != before:
+                    # скорость и пауза приходят в кадрах, hello нужен только при смене настроек
                     await runner.broadcast(runner.hello())
         except WebSocketDisconnect:
             pass

@@ -1,0 +1,797 @@
+{
+ "format": "loom-traffic/world",
+ "version": 1,
+ "name": "Пермь, ул. Мира (OpenStreetMap)",
+ "nodes": {
+  "b1": {
+   "pos": [
+    -516.4,
+    -400.0
+   ],
+   "kind": "boundary"
+  },
+  "b2": {
+   "pos": [
+    12.7,
+    -400.0
+   ],
+   "kind": "boundary"
+  },
+  "b3": {
+   "pos": [
+    620.0,
+    -63.8
+   ],
+   "kind": "boundary"
+  },
+  "b4": {
+   "pos": [
+    620.0,
+    94.0
+   ],
+   "kind": "boundary"
+  },
+  "b5": {
+   "pos": [
+    387.7,
+    520.0
+   ],
+   "kind": "boundary"
+  },
+  "b6": {
+   "pos": [
+    127.4,
+    520.0
+   ],
+   "kind": "boundary"
+  },
+  "j7": {
+   "pos": [
+    426.6,
+    -171.5
+   ],
+   "kind": "signal"
+  },
+  "j8": {
+   "pos": [
+    259.5,
+    136.1
+   ],
+   "kind": "signal"
+  },
+  "j9": {
+   "pos": [
+    67.9,
+    474.9
+   ],
+   "kind": "signal"
+  },
+  "j10": {
+   "pos": [
+    -604.8,
+    -266.3
+   ],
+   "kind": "signal"
+  },
+  "j11": {
+   "pos": [
+    -538.0,
+    -196.6
+   ],
+   "kind": "signal"
+  },
+  "j12": {
+   "pos": [
+    -559.7,
+    -326.2
+   ],
+   "kind": "signal"
+  },
+  "j13": {
+   "pos": [
+    -483.3,
+    -136.9
+   ],
+   "kind": "signal"
+  },
+  "b14": {
+   "pos": [
+    610.3,
+    328.6
+   ],
+   "kind": "boundary"
+  },
+  "j15": {
+   "pos": [
+    531.1,
+    289.5
+   ],
+   "kind": "signal"
+  },
+  "j16": {
+   "pos": [
+    -426.0,
+    -216.2
+   ],
+   "kind": "signal"
+  }
+ },
+ "roads": {
+  "r_j8_j9": {
+   "from": "j8",
+   "to": "j9",
+   "speed": 11.1,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right",
+      "left"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right",
+      "straight",
+      "left"
+     ]
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   }
+  },
+  "r_j7_j8": {
+   "from": "j7",
+   "to": "j8",
+   "speed": 11.1,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right",
+      "straight",
+      "left"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right",
+      "left"
+     ]
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   }
+  },
+  "r_b6_j9": {
+   "from": "b6",
+   "to": "j9",
+   "speed": 16.7,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "straight"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "left"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5
+    },
+    {
+     "width": 3.5
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   }
+  },
+  "r_j10_j11": {
+   "from": "j10",
+   "to": "j11",
+   "speed": 16.7,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "straight"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "straight"
+     ]
+    }
+   ],
+   "backward": [],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "shape": [
+    [
+     -574.1,
+     -242.5
+    ],
+    [
+     -567.9,
+     -228.0
+    ]
+   ]
+  },
+  "r_j8_j15": {
+   "from": "j8",
+   "to": "j15",
+   "speed": 13.9,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "left"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right",
+      "straight"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "left",
+      "straight"
+     ]
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "median": {
+    "width": 8.0
+   },
+   "shape": [
+    [
+     499.6,
+     267.9
+    ]
+   ]
+  },
+  "r_b5_j15": {
+   "from": "b5",
+   "to": "j15",
+   "speed": 13.9,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right",
+      "straight"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "shape": [
+    [
+     504.5,
+     306.8
+    ]
+   ]
+  },
+  "r_b4_j15": {
+   "from": "b4",
+   "to": "j15",
+   "speed": 13.9,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right",
+      "left"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "shape": [
+    [
+     529.9,
+     262.2
+    ]
+   ]
+  },
+  "r_b3_j7": {
+   "from": "b3",
+   "to": "j7",
+   "speed": 11.1,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right",
+      "straight"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   }
+  },
+  "r_b2_j7": {
+   "from": "b2",
+   "to": "j7",
+   "speed": 11.1,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "straight",
+      "left"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   }
+  },
+  "r_j10_j13": {
+   "from": "j10",
+   "to": "j13",
+   "speed": 16.7,
+   "forward": [],
+   "backward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "left"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "left"
+     ]
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "shape": [
+    [
+     -591.5,
+     -225.6
+    ],
+    [
+     -578.4,
+     -219.9
+    ],
+    [
+     -550.2,
+     -189.5
+    ]
+   ]
+  },
+  "r_j13_j16": {
+   "from": "j13",
+   "to": "j16",
+   "speed": 13.9,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "left"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right",
+      "left"
+     ]
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "shape": [
+    [
+     -437.9,
+     -194.7
+    ]
+   ]
+  },
+  "r_j11_j12": {
+   "from": "j11",
+   "to": "j12",
+   "speed": 13.9,
+   "forward": [],
+   "backward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "straight"
+     ]
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "shape": [
+    [
+     -540.5,
+     -207.0
+    ],
+    [
+     -560.5,
+     -232.0
+    ],
+    [
+     -574.8,
+     -287.2
+    ]
+   ]
+  },
+  "r_j10_j12": {
+   "from": "j10",
+   "to": "j12",
+   "speed": 13.9,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "straight"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "left"
+     ]
+    }
+   ],
+   "backward": [],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "median": {
+    "width": 2.2
+   }
+  },
+  "r_b1_j12": {
+   "from": "b1",
+   "to": "j12",
+   "speed": 13.9,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "right"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5
+    },
+    {
+     "width": 3.5
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   }
+  },
+  "r_b14_j15": {
+   "from": "b14",
+   "to": "j15",
+   "speed": 13.9,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "straight"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "left"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5
+    },
+    {
+     "width": 3.5
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "median": {
+    "width": 4.3
+   },
+   "shape": [
+    [
+     538.6,
+     287.8
+    ]
+   ]
+  },
+  "r_j11_j13": {
+   "from": "j11",
+   "to": "j13",
+   "speed": 16.7,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right",
+      "straight"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "left",
+      "straight"
+     ]
+    }
+   ],
+   "backward": [],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   }
+  },
+  "r_j12_j16": {
+   "from": "j12",
+   "to": "j16",
+   "speed": 13.9,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "straight",
+      "left"
+     ]
+    }
+   ],
+   "backward": [],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "shape": [
+    [
+     -562.6,
+     -307.6
+    ],
+    [
+     -555.0,
+     -295.7
+    ],
+    [
+     -495.8,
+     -256.6
+    ],
+    [
+     -435.7,
+     -229.4
+    ]
+   ]
+  },
+  "r_j8_j16": {
+   "from": "j8",
+   "to": "j16",
+   "speed": 13.9,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "right"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right",
+      "straight"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "left",
+      "straight"
+     ]
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "median": {
+    "width": 5.6
+   },
+   "shape": [
+    [
+     -248.0,
+     -141.6
+    ]
+   ]
+  },
+  "r_j9_j13": {
+   "from": "j9",
+   "to": "j13",
+   "speed": 16.7,
+   "forward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "left"
+     ]
+    }
+   ],
+   "backward": [
+    {
+     "width": 3.5,
+     "turns": [
+      "right"
+     ]
+    },
+    {
+     "width": 3.5,
+     "turns": [
+      "straight"
+     ]
+    }
+   ],
+   "sidewalk": {
+    "left": 3.0,
+    "right": 3.0
+   },
+   "median": {
+    "width": 1.6
+   },
+   "shape": [
+    [
+     -15.6,
+     413.0
+    ],
+    [
+     -177.1,
+     282.0
+    ],
+    [
+     -365.3,
+     34.7
+    ]
+   ]
+  }
+ },
+ "junctions": {
+  "j7": {
+   "crosswalks": "auto",
+   "signal": "auto"
+  },
+  "j8": {
+   "crosswalks": "auto",
+   "signal": "auto"
+  },
+  "j9": {
+   "crosswalks": "auto",
+   "signal": "auto"
+  },
+  "j10": {
+   "crosswalks": "auto",
+   "signal": "auto"
+  },
+  "j11": {
+   "crosswalks": "auto",
+   "signal": "auto"
+  },
+  "j12": {
+   "crosswalks": "auto",
+   "signal": "auto"
+  },
+  "j13": {
+   "crosswalks": "auto",
+   "signal": "auto"
+  },
+  "j15": {
+   "crosswalks": "auto",
+   "signal": "auto"
+  },
+  "j16": {
+   "crosswalks": "auto",
+   "signal": "auto"
+  }
+ }
+}

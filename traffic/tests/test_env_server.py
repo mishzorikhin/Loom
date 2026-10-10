@@ -23,6 +23,22 @@ class EnvTest(unittest.TestCase):
         self.assertEqual(len(env.graph()["edges"]), 8)
 
 
+    def test_mask_layout_and_ignored(self):
+        env = TrafficEnv("grid2", seed=1, decision=5, episode=60)
+        env.reset()
+        self.assertEqual(len(env.obs_layout()), env.obs_size)
+        jid = env.agents[0]
+        mask = env.action_mask(jid)
+        self.assertEqual(mask.shape, (env.max_actions,))
+        # в начале минимальный зелёный не прошёл: разрешено только держать текущую фазу
+        self.assertEqual(int(mask.sum()), 1)
+        _, _, _, info = env.step({j: (env.sim.signals[j].phase + 1) % env.n_actions(j) for j in env.agents})
+        self.assertTrue(all(info["ignored"].values()))
+        for _ in range(8):
+            env.step({})
+        self.assertGreater(int(env.action_mask(jid).sum()), 1)
+
+
 class ServerTest(unittest.TestCase):
     def test_ws_hello_net_frame_and_commands(self):
         app = create_app("cross", 1)

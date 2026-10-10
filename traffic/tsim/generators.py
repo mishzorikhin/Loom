@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 COMPASS = {"n": (0, 1), "e": (1, 0), "s": (0, -1), "w": (-1, 0)}
 OPP = {"n": "s", "s": "n", "e": "w", "w": "e"}
 LEFT_OF = {"n": "w", "w": "s", "s": "e", "e": "n"}   # налево от направления движения
@@ -130,3 +132,107 @@ def corridor(n: int = 4, spacing: float = 190.0, tail: float = 160.0, side: floa
              "nodes": nodes, "roads": roads, "junctions": junctions}
     world["midblock_crosswalks"] = [{"id": "park", "road": "r_c1_c2", "at": spacing / 2, "width": 4, "signal": "button"}]
     return world
+
+
+# -- произвольный граф: дороги под любыми углами
+
+def _wrap(a: float) -> float:
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def _movements(heading: float, outs: list[float]) -> dict[str, bool]:
+    """Движения подхода по углам лучей выезда. Правило то же, что в компиляторе (`classify`):
+    прямо — ближайший луч в пределах 40° от продолжения, остальные делятся на левые и правые."""
+    mv = {"left": False, "straight": False, "right": False}
+    cand = [_wrap(o - heading) for o in outs]
+    near = [c for c in cand if abs(c) < math.radians(40)]
+    if near:
+        mv["straight"] = True
+        cand.remove(min(near, key=abs))
+    mv["left"] = any(c > 0 for c in cand)
+    mv["right"] = any(c < 0 for c in cand)
+    return mv
+
+
+def from_graph(nodes: dict[str, dict], edges: list[tuple], name: str, midblock: list[dict] | None = None) -> dict:
+    """Мир из графа: узлы (`pos`, `kind`) и дороги `(от, до, "avenue" | "street", shape | None)`.
+    Полосы и стрелки выводятся по углам лучей, поэтому дороги могут идти под любым углом."""
+    out_angle: dict[str, list[float]] = {k: [] for k in nodes}
+    for a, b, _kind, shape in edges:
+        pa, pb = nodes[a]["pos"], nodes[b]["pos"]
+        first = shape[0] if shape else pb
+        last = shape[-1] if shape else pa
+        out_angle[a].append(math.atan2(first[1] - pa[1], first[0] - pa[0]))
+        out_angle[b].append(math.atan2(last[1] - pb[1], last[0] - pb[0]))
+
+    def lanes_into(node: str, kind: str, out: float) -> list[dict]:
+        if nodes[node]["kind"] != "signal":
+            return _exit(kind)
+        heading = out + math.pi
+        others = [o for o in out_angle[node] if abs(_wrap(o - out)) > 1e-6]
+        return _approach(kind, _movements(heading, others))
+
+    roads = {}
+    for a, b, kind, shape in edges:
+        pa, pb = nodes[a]["pos"], nodes[b]["pos"]
+        first = shape[0] if shape else pb
+        last = shape[-1] if shape else pa
+        r = {
+            "from": a, "to": b, "speed": 16.7 if kind == "avenue" else 11.1,
+            "forward": lanes_into(b, kind, math.atan2(last[1] - pb[1], last[0] - pb[0])),
+            "backward": lanes_into(a, kind, math.atan2(first[1] - pa[1], first[0] - pa[0])),
+            "sidewalk": {"left": 3.5 if kind == "avenue" else 3.0, "right": 3.5 if kind == "avenue" else 3.0},
+        }
+        if kind == "avenue":
+            r["median"] = {"width": 1.0}
+        if shape:
+            r["shape"] = shape
+        roads[f"r_{a}_{b}"] = r
+    junctions = {k: {"crosswalks": "auto", "signal": "auto"} for k, v in nodes.items() if v["kind"] == "signal"}
+    world = {"format": "loom-traffic/world", "version": 1, "name": name, "nodes": nodes, "roads": roads, "junctions": junctions}
+    if midblock:
+        world["midblock_crosswalks"] = midblock
+    return world
+
+
+def district() -> dict:
+    """Городской район: проспект по диагонали, шоссе под острым углом, косые перекрёстки, Т-образные, кривая улица."""
+    def at(p, deg, d):
+        a = math.radians(deg)
+        return [round(p[0] + d * math.cos(a), 1), round(p[1] + d * math.sin(a), 1)]
+
+    m0 = [0.0, 0.0]
+    m1 = at(m0, 25, 230)
+    m2 = at(m1, 25, 210)
+    m3 = at(m2, 25, 220)
+    p = at(m1, 100, 160)
+    nodes = {
+        "m0": {"pos": m0, "kind": "signal"}, "m1": {"pos": m1, "kind": "signal"},
+        "m2": {"pos": m2, "kind": "signal"}, "m3": {"pos": m3, "kind": "signal"},
+        "p": {"pos": p, "kind": "signal"},
+        "b_sw": {"pos": at(m0, 205, 170), "kind": "boundary"},
+        "b_ne": {"pos": at(m3, 25, 170), "kind": "boundary"},
+        "b_hw": {"pos": [-250.0, 330.0], "kind": "boundary"},
+        "b_n1": {"pos": at(p, 100, 150), "kind": "boundary"},
+        "b_s1": {"pos": at(m1, 280, 180), "kind": "boundary"},
+        "b_w": {"pos": at(p, 190, 190), "kind": "boundary"},
+        "b_e": {"pos": at(p, 8, 200), "kind": "boundary"},
+        "b_s2": {"pos": at(m2, 295, 150), "kind": "boundary"},
+        "b_n3": {"pos": at(m3, 80, 190), "kind": "boundary"},
+        "b_s3": {"pos": at(m3, 262, 210), "kind": "boundary"},
+    }
+    s2 = at(m2, 295, 70)
+    s2 = [s2[0] + 18, s2[1]]
+    s3 = at(m3, 262, 100)
+    s3 = [s3[0] - 35, s3[1]]
+    edges = [
+        ("m0", "b_sw", "avenue", None),
+        ("m0", "m1", "avenue", None), ("m1", "m2", "avenue", None), ("m2", "m3", "avenue", None),
+        ("m3", "b_ne", "avenue", None),
+        ("m0", "b_hw", "avenue", None),
+        ("m1", "p", "street", None), ("p", "b_n1", "street", None), ("m1", "b_s1", "street", None),
+        ("p", "b_w", "street", None), ("p", "b_e", "street", None),
+        ("m2", "b_s2", "street", [s2]),
+        ("m3", "b_n3", "street", None), ("m3", "b_s3", "street", [s3]),
+    ]
+    return from_graph(nodes, edges, "Район с диагональным проспектом")

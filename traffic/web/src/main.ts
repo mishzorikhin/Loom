@@ -10,7 +10,7 @@ import { City } from "./world/city";
 import { Signals } from "./world/signals";
 import { Actors } from "./world/actors";
 import { Overlays } from "./world/overlays";
-import { $, carCard, drawSpark, junctionCard, pedCard, renderEvents, renderStats } from "./hud";
+import { $, carCard, esc, drawSpark, junctionCard, pedCard, renderEvents, renderStats } from "./hud";
 
 const stage = new Stage($("world"));
 let world: THREE.Group | null = null;
@@ -70,10 +70,10 @@ function onHello(h: HelloMsg) {
   hello = h;
   const s = h.settings;
   const sel = $("worlds") as HTMLSelectElement;
-  sel.innerHTML = h.worlds.map((w) => `<option value="${w.id}">${w.title}</option>`).join("");
+  sel.innerHTML = h.worlds.map((w) => `<option value="${esc(w.id)}">${esc(w.title)}</option>`).join("");
   sel.value = s.world;
   $("speeds").innerHTML = h.speeds.map((v) => `<button data-speed="${v}">×${String(v).replace(".", ",")}</button>`).join("");
-  $("controllers").innerHTML = h.controllers.map((c) => `<button data-ctl="${c.id}" class="${c.id === s.controller ? "on" : ""}">${c.title}</button>`).join("");
+  $("controllers").innerHTML = h.controllers.map((c) => `<button data-ctl="${esc(c.id)}" class="${c.id === s.controller ? "on" : ""}">${esc(c.title)}</button>`).join("");
   const hints: Record<string, string> = {
     fixed: "Фазы идут по кругу с длительностью зелёного от состава фазы.",
     max_pressure: "Каждые 2 с выбирается фаза с наибольшим давлением: очередь на входе минус загрузка выхода.",
@@ -95,14 +95,24 @@ function setSlider(id: string, v: number, label: (v: number) => string) {
   $(`${id}-v`).textContent = label(v);
 }
 
+function disposeTree(root: THREE.Object3D) {
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    mesh.geometry?.dispose();
+    const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+    for (const mat of mats) {
+      for (const v of Object.values(mat)) if (v instanceof THREE.Texture) v.dispose();
+      mat.dispose();
+    }
+    (o as THREE.InstancedMesh).dispose?.();
+  });
+}
+
 function onNet(m: NetMsg) {
   net = m.net;
   if (world) {
     stage.scene.remove(world);
-    world.traverse((o) => {
-      const mesh = o as THREE.Mesh;
-      if (mesh.geometry) mesh.geometry.dispose();
-    });
+    disposeTree(world);
   }
   world = new THREE.Group();
   const roads = buildRoads(net.render, m.scenery.ground);
@@ -143,7 +153,7 @@ function onFrame(f: FrameMsg) {
     events.push(...fresh);
     if (events.length > 400) events = events.slice(-400);
     overlays?.add(fresh, now, !f.full);
-    if (fresh.length) renderEvents(events.filter((e) => e.kind !== "stuck" || true), freshIds);
+    if (fresh.length) renderEvents(events, freshIds);
   }
   if (f.full) renderEvents(events, freshIds);
   if (f.series) drawSpark($("spark") as HTMLCanvasElement, f.series);
