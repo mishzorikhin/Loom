@@ -26,7 +26,12 @@ let selected: { kind: "car" | "ped" | "junction"; id: number | string } | null =
 let follow = true;
 let hourSync = true;
 let manualHour = 12;
-const layers = { strips: true, conflicts: false, heat: false, mini: false };
+const layers = { strips: true, conflicts: false, heat: false, mini: false, hq: true };
+try {
+  if (localStorage.getItem("quality") === "low") layers.hq = false;
+} catch {
+  /* без хранилища — высокое качество */
+}
 
 // ---------------------------------------------------------------- сокет
 
@@ -347,7 +352,7 @@ window.addEventListener("keydown", (e) => {
   }
   const views: Record<string, "3d" | "top" | "low"> = { Digit1: "3d", Digit2: "top", Digit3: "low" };
   if (views[e.code]) stage.view(views[e.code]);
-  const lk: Record<string, keyof typeof layers> = { KeyS: "strips", KeyC: "conflicts", KeyH: "heat", KeyM: "mini" };
+  const lk: Record<string, keyof typeof layers> = { KeyS: "strips", KeyC: "conflicts", KeyH: "heat", KeyM: "mini", KeyQ: "hq" };
   if (lk[e.code]) {
     layers[lk[e.code]] = !layers[lk[e.code]];
     applyLayers();
@@ -370,6 +375,14 @@ function applyLayers() {
     overlays.heat.visible = layers.heat;
   }
   stage.setMiniature(layers.mini);
+  if (stage.quality !== (layers.hq ? "high" : "low")) {
+    stage.setQuality(layers.hq ? "high" : "low");
+    try {
+      localStorage.setItem("quality", layers.hq ? "high" : "low");
+    } catch {
+      /* не запоминаем */
+    }
+  }
 }
 
 // ---------------------------------------------------------------- цикл отрисовки

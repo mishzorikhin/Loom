@@ -135,8 +135,8 @@ export class Actors {
     this.links = net.links.map((l) => new Path(l.pts));
     this.next = net.links.map((l) => l.next ?? []);
     this.edges = net.sw_edges.map((e) => new Path(e.pts));
-    const bodyMat = new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.32, metalness: 0.25 });
-    const glassMat = new THREE.MeshStandardMaterial({ color: "#5b7389", roughness: 0.18, metalness: 0.05 });
+    const bodyMat = new THREE.MeshPhysicalMaterial({ color: "#ffffff", roughness: 0.38, metalness: 0.3, clearcoat: 0.8, clearcoatRoughness: 0.12 });
+    const glassMat = new THREE.MeshStandardMaterial({ color: "#2a3846", roughness: 0.06, metalness: 0.85, envMapIntensity: 1.4 });
     const underMat = new THREE.MeshStandardMaterial({ color: "#15171b", roughness: 0.9 });
     this.headMat = new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false });
     const tailMat = new THREE.MeshBasicMaterial({ color: "#ffffff", toneMapped: false });

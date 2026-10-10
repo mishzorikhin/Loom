@@ -8,6 +8,8 @@ import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
 import { HorizontalTiltShiftShader } from "three/addons/shaders/HorizontalTiltShiftShader.js";
 import { VerticalTiltShiftShader } from "three/addons/shaders/VerticalTiltShiftShader.js";
+import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
+import { Sky } from "three/addons/objects/Sky.js";
 import { clamp, smooth } from "../geom";
 
 /** Мировые координаты (x на восток, y на север) → сцена (x, 0, -y). */
@@ -57,6 +59,17 @@ export class Stage {
   readonly sky: THREE.Mesh;
   private skyMat: THREE.ShaderMaterial;
   private tiltH: ShaderPass;
+  /** Физическое небо (рассеяние в атмосфере, облака) — фон днём и источник освещения сцены. */
+  private skyPhys: Sky;
+  private envSky: Sky;
+  private envScene = new THREE.Scene();
+  private pmrem: THREE.PMREMGenerator;
+  private envRT: THREE.WebGLRenderTarget | null = null;
+  private envHour = -100;
+  private gtao: GTAOPass;
+  private grade: ShaderPass;
+  private time = 0;
+  quality: "high" | "low" = "high";
   private tiltV: ShaderPass;
   readonly day: Daylight = { hour: 12, night: 0, sunDir: new THREE.Vector3(1, 1, 1) };
   private center = new THREE.Vector3();
@@ -120,11 +133,31 @@ export class Stage {
           gl_FragColor = vec4(col, 1.0);
         }`,
     });
-    this.sky = new THREE.Mesh(new THREE.SphereGeometry(3000, 32, 16), this.skyMat);
+    this.skyMat.transparent = true;
+    this.sky = new THREE.Mesh(new THREE.SphereGeometry(2800, 32, 16), this.skyMat);
     this.sky.renderOrder = -10;
-    this.scene.add(this.sky);
-    this.scene.fog = new THREE.Fog("#d6e2ec", 1400, 4200);
+    this.skyPhys = new Sky();
+    this.skyPhys.scale.setScalar(5000);
+    this.skyPhys.renderOrder = -11;
+    this.envSky = new Sky();
+    this.envSky.scale.setScalar(1000);
+    this.envScene.add(this.envSky);
+    for (const s of [this.skyPhys, this.envSky]) {
+      const u = s.material.uniforms;
+      u.turbidity.value = 5;
+      u.rayleigh.value = 1.4;
+      u.mieCoefficient.value = 0.004;
+      u.mieDirectionalG.value = 0.82;
+      if (u.cloudCoverage) u.cloudCoverage.value = 0.32;
+      if (u.cloudDensity) u.cloudDensity.value = 0.35;
+    }
+    // в карте окружения без диска солнца: иначе его яркость отражается в фасадах и зажигает свечение
+    this.envSky.material.uniforms.showSunDisc.value = 0;
+    this.scene.add(this.skyPhys, this.sky);
+    // воздушная перспектива: даль уходит в цвет горизонта
+    this.scene.fog = new THREE.FogExp2("#d6e2ec", 0.00045);
 
+    this.pmrem = new THREE.PMREMGenerator(r);
     this.hemi = new THREE.HemisphereLight("#cfe4ff", "#5d6a4f", 1.0);
     this.scene.add(this.hemi);
     this.sun = new THREE.DirectionalLight("#ffffff", 3);
@@ -139,6 +172,11 @@ export class Stage {
     const rt = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: 4 });
     this.composer = new EffectComposer(r, rt);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
+    // мягкое затенение в углах, под машинами, у стен и деревьев
+    this.gtao = new GTAOPass(this.scene, this.camera, size.x, size.y);
+    this.gtao.updateGtaoMaterial({ radius: 3.5, distanceExponent: 1.2, thickness: 3, scale: 1.1, samples: 12, distanceFallOff: 1 });
+    this.gtao.blendIntensity = 0.85;
+    this.composer.addPass(this.gtao);
     this.bloom = new UnrealBloomPass(size, 0.5, 0.55, 0.9);
     this.composer.addPass(this.bloom);
     this.tiltH = new ShaderPass(HorizontalTiltShiftShader);
@@ -147,6 +185,8 @@ export class Stage {
     this.composer.addPass(this.tiltH);
     this.composer.addPass(this.tiltV);
     this.composer.addPass(new OutputPass());
+    this.grade = new ShaderPass(GradeShader);
+    this.composer.addPass(this.grade);
 
     window.addEventListener("resize", () => this.resize());
   }
@@ -186,6 +226,17 @@ export class Stage {
     const a = this.area;
     if (!(a.w > 0 && a.h > 0)) return 1;
     return Math.min(1.8, Math.max(1, Math.min(W / a.w, H / a.h) * 0.92));
+  }
+
+  /** Высокое качество: затенение GTAO и плотность пикселей до 2; низкое — без них. */
+  setQuality(q: "high" | "low") {
+    this.quality = q;
+    this.gtao.enabled = q === "high";
+    this.renderer.setPixelRatio(q === "high" ? Math.min(window.devicePixelRatio, 2) : 1);
+    this.sun.shadow.mapSize.set(q === "high" ? 4096 : 2048, q === "high" ? 4096 : 2048);
+    this.sun.shadow.map?.dispose();
+    this.sun.shadow.map = null;
+    this.resize();
   }
 
   setMiniature(on: boolean) {
@@ -264,7 +315,8 @@ export class Stage {
     this.skyMat.uniforms.top.value.copy(top);
     this.skyMat.uniforms.hor.value.copy(hor);
     this.skyMat.uniforms.sunCol.value.copy(sunCol);
-    (this.scene.fog as THREE.Fog).color.copy(mix(a.fog, b.fog));
+    const fogCol = mix(a.fog, b.fog);
+    (this.scene.fog as THREE.FogExp2).color.copy(fogCol);
 
     // солнце по дуге с востока на запад, ночью — луна с юго-запада
     const ang = ((hour - 6) / 14) * Math.PI;
@@ -277,19 +329,39 @@ export class Stage {
     this.day.night = night;
     this.skyMat.uniforms.sunDir.value.copy(el > -0.02 ? dir : new THREE.Vector3(0, -1, 0));
     this.skyMat.uniforms.stars.value = night;
+    // днём фон — физическое небо, к ночи поверх него проявляется ночной купол со звёздами
+    this.skyMat.opacity = smooth((night - 0.15) / 0.6);
+    this.sky.visible = this.skyMat.opacity > 0.01;
+    const sunPos = new THREE.Vector3(Math.cos(ang), el, -0.35).normalize();
+    this.skyPhys.material.uniforms.sunPosition.value.copy(sunPos);
+    this.skyPhys.visible = night < 0.98;
+    // освещение от неба: пересчёт при заметном сдвиге часов
+    if (Math.abs(hour - this.envHour) > 0.2) {
+      this.envHour = hour;
+      this.envSky.material.uniforms.sunPosition.value.copy(sunPos);
+      const rt = this.pmrem.fromScene(this.envScene, 0, 1, 2000);
+      this.envRT?.dispose();
+      this.envRT = rt;
+      this.scene.environment = rt.texture;
+    }
+    this.scene.environmentIntensity = 0.28 * (1 - night) + 0.03;
+    (this.scene.fog as THREE.FogExp2).density = 0.00035 + night * 0.0002;
 
     this.sun.color.copy(sunCol);
-    this.sun.intensity = a.sunI + (b.sunI - a.sunI) * t;
+    this.sun.intensity = (a.sunI + (b.sunI - a.sunI) * t) * 0.78;
     this.sun.position.copy(this.center).add(dir.clone().multiplyScalar(this.radius * 3));
     this.sun.target.position.copy(this.center);
-    this.hemi.intensity = a.hemiI + (b.hemiI - a.hemiI) * t;
+    // небо уже светит через окружение, полусфера — только подсветка теней
+    this.hemi.intensity = (a.hemiI + (b.hemiI - a.hemiI) * t) * 0.45;
     this.hemi.color.copy(top).lerp(new THREE.Color("#ffffff"), 0.55);
     this.hemi.groundColor.set(night > 0.5 ? "#1a2030" : "#6b6f5c");
 
-    this.bloom.strength = 0.3 + night * 0.25;
-    this.bloom.threshold = 0.9 - night * 0.12;
+    // днём светятся только лампы и фары (яркость выше обычных поверхностей), ночью порог ниже
+    this.bloom.strength = 0.32 + night * 0.25;
+    this.bloom.threshold = 2.2 - night * 1.4;
     this.bloom.radius = 0.45;
-    this.renderer.toneMappingExposure = 1.0;
+    this.renderer.toneMappingExposure = 0.86 + night * 0.16;
+    this.grade.uniforms.warmth.value = (1 - night) * 0.05 + (hour > 16 && hour < 20 ? 0.04 : 0);
   }
 
   render(dt: number) {
@@ -302,6 +374,10 @@ export class Stage {
     }
     this.controls.update();
     this.sky.position.copy(this.camera.position);
+    this.skyPhys.position.copy(this.camera.position);
+    this.time += dt;
+    this.skyPhys.material.uniforms.time.value = this.time;
+    this.grade.uniforms.time.value = this.time;
     if (this.miniature) {
       // линия резкости — центр экрана
       this.tiltH.uniforms.r.value = 0.5;
@@ -310,3 +386,37 @@ export class Stage {
     this.composer.render(dt);
   }
 }
+
+/** Цветокоррекция после тональной компрессии: контраст, насыщенность, тёплый тон, виньетка, лёгкое зерно. */
+const GradeShader = {
+  name: "GradeShader",
+  uniforms: {
+    tDiffuse: { value: null },
+    time: { value: 0 },
+    warmth: { value: 0.04 },
+    contrast: { value: 1.06 },
+    saturation: { value: 1.1 },
+    vignette: { value: 0.22 },
+    grain: { value: 0.018 },
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float time; uniform float warmth; uniform float contrast;
+    uniform float saturation; uniform float vignette; uniform float grain;
+    varying vec2 vUv;
+    float h(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+    void main(){
+      vec4 c = texture2D(tDiffuse, vUv);
+      vec3 col = c.rgb;
+      col = (col - 0.5) * contrast + 0.5;
+      float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      col = mix(vec3(l), col, saturation);
+      // тёплые света, чуть холодные тени
+      col += vec3(warmth, warmth * 0.45, -warmth * 0.6) * smoothstep(0.25, 1.0, l);
+      col += vec3(-0.01, 0.0, 0.015) * (1.0 - smoothstep(0.0, 0.35, l));
+      vec2 d = vUv - 0.5;
+      col *= 1.0 - vignette * smoothstep(0.35, 0.85, length(d * vec2(1.0, 0.85)));
+      col += (h(vUv * 1000.0 + time) - 0.5) * grain;
+      gl_FragColor = vec4(clamp(col, 0.0, 1.0), c.a);
+    }`,
+};
