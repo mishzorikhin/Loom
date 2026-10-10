@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Транспортный полигон</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='10' y='2' width='12' height='28' rx='4' fill='%231b1f27'/%3E%3Ccircle cx='16' cy='9' r='3.4' fill='%23ff4848'/%3E%3Ccircle cx='16' cy='16' r='3.4' fill='%23ffb21e'/%3E%3Ccircle cx='16' cy='23' r='3.4' fill='%232bff88'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="world"></div>
+    <div id="vignette"></div>
+
+    <!-- Раскладка: верхняя полоса, две колонки по краям, центр для сцены. Блоки не накладываются: каждая колонка — стек со своей прокруткой. -->
+    <div id="ui">
+      <header id="top" class="glass">
+        <div class="zone zone-left">
+          <span class="brand-mark"><i></i><i></i><i></i></span>
+          <span class="brand-name">Полигон</span>
+          <label class="world-pick" title="Мир">
+            <select id="worlds"></select>
+          </label>
+        </div>
+        <div class="zone zone-mid">
+          <span id="sun" class="sun"></span>
+          <span id="clock" class="clock">--:--</span>
+          <button id="play" class="icon-btn" title="Пауза / пуск (пробел)"></button>
+          <div id="speeds" class="seg"></div>
+          <span id="eff" class="eff"></span>
+        </div>
+        <div class="zone zone-right">
+          <button id="toggle-left" class="icon-btn small" title="Левая колонка ([)"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="2.5" y="3.5" width="4" height="9" rx="1"/></svg></button>
+          <button id="toggle-right" class="icon-btn small" title="Правая колонка (])"><svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="9.5" y="3.5" width="4" height="9" rx="1"/></svg></button>
+          <span id="conn" class="conn" title="Связь с сервером"></span>
+        </div>
+      </header>
+
+      <aside id="left" class="rail">
+        <section class="glass panel fill">
+          <nav class="tabs" id="left-tabs">
+            <button data-tab="control" class="on">Управление</button>
+            <button data-tab="inspect">Осмотр <i id="inspect-dot" class="dot hidden"></i></button>
+          </nav>
+          <div class="panel-scroll" data-pane="control">
+            <h4>Контроллер светофоров</h4>
+            <div id="controllers" class="seg seg-wide"></div>
+            <p id="ctl-hint" class="hint"></p>
+            <label class="slider">
+              <span>Поток машин <b id="demand-v"></b></span>
+              <input id="demand" type="range" min="0" max="3" step="0.05" />
+            </label>
+            <label class="slider">
+              <span>Пешеходы <b id="peds-v"></b></span>
+              <input id="peds" type="range" min="0" max="3" step="0.05" />
+            </label>
+            <label class="slider danger">
+              <span>Запас переходных стадий <b id="timing-v"></b></span>
+              <input id="timing" type="range" min="0" max="1.5" step="0.05" />
+              <small id="timing-hint">Жёлтый, весь красный и мигающий зелёный в долях от безопасных по геометрии</small>
+            </label>
+            <label class="toggle">
+              <input id="block-box" type="checkbox" />
+              <span>Не въезжать на занятый перекрёсток</span>
+            </label>
+            <div class="row">
+              <label class="seed">Зерно <input id="seed" type="number" min="0" step="1" /></label>
+              <button id="reset" class="btn">Сбросить прогон</button>
+            </div>
+          </div>
+          <div class="panel-scroll hidden" data-pane="inspect" id="inspect">
+            <p class="muted empty">Щёлкните по перекрёстку, машине или пешеходу на карте.</p>
+          </div>
+        </section>
+      </aside>
+
+      <main id="center">
+        <div id="toast" class="toast hidden"></div>
+        <footer id="bottom" class="glass">
+          <div class="seg" id="views">
+            <button data-view="3d" title="Обзор (1)">Обзор</button>
+            <button data-view="top" title="Сверху (2)">Сверху</button>
+            <button data-view="low" title="Низко (3)">Низко</button>
+          </div>
+          <div class="layers" id="layers">
+            <button data-layer="strips" class="on" title="Состояние сигнала на каждом движении (S)">Сигналы</button>
+            <button data-layer="conflicts" title="Точки конфликтов (C)">Конфликты</button>
+            <button data-layer="heat" title="Тепловая карта ДТП и сближений (H)">Тепло</button>
+            <button data-layer="mini" title="Эффект миниатюры (M)">Миниатюра</button>
+          </div>
+          <div class="hour">
+            <span>Свет</span>
+            <input id="hour" type="range" min="0" max="24" step="0.25" title="Время суток только для картинки; часы симуляции не меняются" />
+            <button id="hour-sync" class="btn small on" title="Свет по часам симуляции">по часам</button>
+          </div>
+        </footer>
+      </main>
+
+      <aside id="right" class="rail">
+        <section class="glass panel" id="summary">
+          <h3>Сводка <span id="sim-time" class="muted"></span></h3>
+          <div class="kpis">
+            <div class="kpi"><b id="k-cars">0</b><span>в сети</span></div>
+            <div class="kpi"><b id="k-done">0</b><span>доехали</span></div>
+            <div class="kpi"><b id="k-delay">0</b><span>задержка, с</span></div>
+            <div class="kpi"><b id="k-peds">0</b><span>пешеходов</span></div>
+            <div class="kpi bad"><b id="k-crash">0</b><span>ДТП</span></div>
+            <div class="kpi warn"><b id="k-near">0</b><span>сближений</span></div>
+          </div>
+          <canvas id="spark" width="560" height="150"></canvas>
+          <div class="legend-row">
+            <span><i class="sw" style="background: var(--accent)"></i>доехали / мин</span>
+            <span><i class="sw" style="background: var(--amber)"></i>задержка</span>
+            <span><i class="sw" style="background: var(--red)"></i>ДТП</span>
+          </div>
+          <div id="causes" class="causes"></div>
+          <div id="violations" class="muted small"></div>
+        </section>
+        <section class="glass panel fill" id="feed">
+          <h3>События</h3>
+          <ul id="events" class="panel-scroll"></ul>
+        </section>
+      </aside>
+    </div>
+
+    <div id="boot" class="boot"><div class="boot-mark"><i></i><i></i><i></i></div><p>Подключение к симуляции…</p></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

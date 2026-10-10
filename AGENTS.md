@@ -29,7 +29,13 @@
 
 ## Второй проект: `traffic/`
 
-В каталоге `traffic/` лежит отдельный проект — транспортная симуляция для обучения нейросети управлять светофорами. С Loom он не связан: общего кода, образа и базы нет, в контейнер `simcheck` не входит. Пока там только проект и формат описания мира, кода нет. Начинать с `traffic/README.md`, решения — `traffic/docs/design.md`, формат — `traffic/docs/world-format.md`. Правила этого файла про язык и актуальность документов действуют и там.
+В каталоге `traffic/` — отдельный проект «Транспортный полигон»: симуляция улиц, перекрёстков со светофорами, машин, пешеходов и ДТП для обучения нейросети управлять светофорами. С Loom он не связан: свой код (`traffic/tsim/`, `traffic/web/`), свои тесты, не входит в образ и контейнер `simcheck`, общего с Loom только язык документов и правило их актуальности.
+
+- Начинать с `traffic/README.md`; устройство и замысел — `traffic/docs/design.md`, формат мира — `traffic/docs/world-format.md`, страница и графика (Three.js) — `traffic/docs/graphics.md`.
+- Запуск: `cd traffic && python3 -m tsim.server --port 8500` после `cd web && npm install && npm run build`; разработка страницы — `npm run dev` (порт 5180).
+- Тесты: `cd traffic && python3 -m unittest discover -s tests`; типы страницы: `cd traffic/web && npm run typecheck`. Тесты Loom из корня (`-s tests`) их не запускают.
+- Сравнение контроллеров без картинки: `python3 -m tsim.run`; среда обучения — `tsim/env.py`.
+- `traffic/web/dist` и `node_modules` в git не входят.
 
 ## Журнал для агента
 
