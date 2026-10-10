@@ -2,6 +2,8 @@
 import * as THREE from "three";
 import type { P2, RenderJ } from "../types";
 import { offsetLine, Path } from "../geom";
+import type { Ray } from "./terrain";
+import { asphaltMaps, grassMap, macroVariation, paintMap, paversMap } from "./materials";
 
 const Y_ASPHALT = 0.0;
 const Y_MARK = 0.025;
@@ -102,39 +104,6 @@ export class Builder {
   }
 }
 
-function noiseTexture(base: string, amp: number, size = 256) {
-  const c = document.createElement("canvas");
-  c.width = c.height = size;
-  const ctx = c.getContext("2d")!;
-  ctx.fillStyle = base;
-  ctx.fillRect(0, 0, size, size);
-  const img = ctx.getImageData(0, 0, size, size);
-  let seed = 7;
-  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
-  for (let i = 0; i < img.data.length; i += 4) {
-    const n = (rnd() - 0.5) * amp;
-    img.data[i] += n;
-    img.data[i + 1] += n;
-    img.data[i + 2] += n;
-  }
-  ctx.putImageData(img, 0, 0);
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.colorSpace = THREE.SRGBColorSpace;
-  t.anisotropy = 8;
-  return t;
-}
-
-/** Расстояние от точки внутри рамки до её края по направлению. */
-function rayBox(p: P2, d: P2, box: [number, number, number, number]) {
-  let t = 1e9;
-  if (d[0] > 1e-6) t = Math.min(t, (box[2] - p[0]) / d[0]);
-  if (d[0] < -1e-6) t = Math.min(t, (box[0] - p[0]) / d[0]);
-  if (d[1] > 1e-6) t = Math.min(t, (box[3] - p[1]) / d[1]);
-  if (d[1] < -1e-6) t = Math.min(t, (box[1] - p[1]) / d[1]);
-  return Math.max(0, t);
-}
-
 function slicePath(p: Path, s0: number, s1: number): P2[] {
   const o = { x: 0, y: 0, h: 0 };
   const out: P2[] = [];
@@ -199,6 +168,7 @@ function arrowShape(b: Builder, pos: P2, dir: number, turns: string[], h: number
 }
 
 export interface RoadMeshes {
+  rays: Ray[];
   group: THREE.Group;
   pick: THREE.Mesh[];
 }
@@ -207,45 +177,23 @@ export function buildRoads(R: RenderJ, groundBox: [number, number, number, numbe
   const group = new THREE.Group();
   const pick: THREE.Mesh[] = [];
 
-  const asphaltTex = noiseTexture("#e8e8e8", 30);
-  const asphalt = new THREE.MeshStandardMaterial({ color: "#7d838e", roughness: 0.92, metalness: 0, map: asphaltTex });
-  const walkTex = noiseTexture("#f2f2f2", 16);
-  const walk = new THREE.MeshStandardMaterial({ color: "#d9d4ca", roughness: 0.88, map: walkTex });
-  const curb = new THREE.MeshStandardMaterial({ color: "#eeeae2", roughness: 0.75, side: THREE.DoubleSide });
-  const grass = new THREE.MeshStandardMaterial({ color: "#7d9a5c", roughness: 0.95 });
+  const am = asphaltMaps();
+  const asphalt = macroVariation(new THREE.MeshStandardMaterial({ color: "#c2c6cc", roughness: 1, roughnessMap: am.rough, metalness: 0, map: am.map }), 60, 0.12);
+  const walk = macroVariation(new THREE.MeshStandardMaterial({ color: "#f2eee6", roughness: 0.9, map: paversMap() }), 40, 0.08);
+  const curb = new THREE.MeshStandardMaterial({ color: "#d9d6cf", roughness: 0.8, side: THREE.DoubleSide });
+  const gm = grassMap();
+  gm.repeat.set(1 / 3.3, 1 / 3.3);
+  const grass = macroVariation(new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.95, map: gm }), 40, 0.15);
+  const pm = paintMap();
+  pm.repeat.set(0.5, 0.5);
   const paint = new THREE.MeshStandardMaterial({
-    color: "#f4f3ee", roughness: 0.55, emissive: "#3a3a36", polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+    color: "#f1efe8", map: pm, roughness: 0.6, emissive: "#2a2a27", polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
   });
-
-  // плита-диорама: газон сверху, срез грунта по краям
-  const [gx0, gy0, gx1, gy1] = groundBox;
-  const rad = 16;
-  const shape = new THREE.Shape();
-  shape.moveTo(gx0 + rad, gy0);
-  shape.lineTo(gx1 - rad, gy0);
-  shape.quadraticCurveTo(gx1, gy0, gx1, gy0 + rad);
-  shape.lineTo(gx1, gy1 - rad);
-  shape.quadraticCurveTo(gx1, gy1, gx1 - rad, gy1);
-  shape.lineTo(gx0 + rad, gy1);
-  shape.quadraticCurveTo(gx0, gy1, gx0, gy1 - rad);
-  shape.lineTo(gx0, gy0 + rad);
-  shape.quadraticCurveTo(gx0, gy0, gx0 + rad, gy0);
-  const depth = 9;
-  const slabGeo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: true, bevelThickness: 0.8, bevelSize: 0.8, bevelSegments: 3, curveSegments: 10 });
-  slabGeo.rotateX(-Math.PI / 2);
-  slabGeo.translate(0, -depth - 0.8 - 0.06, 0);
-  const groundTex = noiseTexture("#ececec", 22, 128);
-  groundTex.repeat.set(0.05, 0.05);
-  const slab = new THREE.Mesh(slabGeo, [
-    new THREE.MeshStandardMaterial({ color: "#93ad6c", roughness: 1, map: groundTex }),
-    new THREE.MeshStandardMaterial({ color: "#6a5646", roughness: 1 }),
-  ]);
-  slab.receiveShadow = true;
-  group.add(slab);
 
   // асфальт: дороги, продолжения за край сети, перекрёстки
   const ab = new Builder();
   const ext: { l: P2[]; r: P2[] }[] = [];
+  const rays: Ray[] = [];
   for (const r of R.roads) {
     ab.strip(r.left, r.right, Y_ASPHALT);
     r.boundary.forEach((isB, end) => {
@@ -256,10 +204,13 @@ export function buildRoads(R: RenderJ, groundBox: [number, number, number, numbe
       const dx = L[0][0] - L[1][0];
       const dy = L[0][1] - L[1][1];
       const d = Math.hypot(dx, dy) || 1;
-      const far = rayBox(L[0], [dx / d, dy / d], groundBox) + 0.6;
+      // дорога уходит за край сети в долину и растворяется в дымке
+      const far = 1800;
+      rays.push({ p: [(L[0][0] + Rr[0][0]) / 2, (L[0][1] + Rr[0][1]) / 2], d: [dx / d, dy / d] });
       const l: P2[] = [[L[0][0] + (dx / d) * far, L[0][1] + (dy / d) * far], L[0]];
       const rr: P2[] = [[Rr[0][0] + (dx / d) * far, Rr[0][1] + (dy / d) * far], Rr[0]];
-      ext.push({ l, r: rr });
+      // у конца дороги левый и правый края меняются местами относительно направления внутрь сети
+      ext.push(end === 0 ? { l, r: rr } : { l: rr, r: l });
     });
   }
   for (const e of ext) ab.strip(e.l, e.r, Y_ASPHALT);
@@ -372,5 +323,5 @@ export function buildRoads(R: RenderJ, groundBox: [number, number, number, numbe
   paintMesh.receiveShadow = true;
   group.add(paintMesh);
 
-  return { group, pick };
+  return { group, pick, rays };
 }

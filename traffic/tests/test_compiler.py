@@ -2,7 +2,7 @@ import copy
 import unittest
 
 from tsim.compiler import CompileError, compile_world, load_world, net_json
-from tsim.generators import corridor, grid
+from tsim.generators import corridor, district, grid, irregular
 from tsim.worlds import ROOT
 
 CROSS = load_world(ROOT / "examples" / "cross.json")
@@ -61,7 +61,7 @@ class CompilerTest(unittest.TestCase):
         self.assertTrue(any(m.startswith("roads/rn/forward/0/width") for m in e.exception.errors))
 
     def test_generators_and_auto_signals(self):
-        for w in (grid(3, 3), grid(2, 2), corridor(4)):
+        for w in (grid(3, 3), grid(2, 2), corridor(4), district(), irregular()):
             net = compile_world(w)
             for j in net.junctions.values():
                 self.assertGreaterEqual(len(j.phases), 2)

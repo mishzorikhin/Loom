@@ -21,7 +21,6 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); c
 button { font: inherit; color: inherit; }
 #world { position: fixed; inset: 0; }
 #world canvas { display: block; outline: none; }
-#vignette { position: fixed; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, transparent 55%, rgba(5, 8, 14, 0.38) 100%); }
 
 .glass {
   background: var(--glass);

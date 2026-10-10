@@ -6,11 +6,12 @@ import * as THREE from "three";
 import type { FrameMsg, HelloMsg, NetMsg, SimEvent } from "./types";
 import { Stage } from "./world/stage";
 import { buildRoads } from "./world/roads";
+import { Terrain } from "./world/terrain";
 import { City } from "./world/city";
 import { Signals } from "./world/signals";
 import { Actors } from "./world/actors";
 import { Overlays } from "./world/overlays";
-import { $, carCard, drawSpark, junctionCard, pedCard, renderEvents, renderStats } from "./hud";
+import { $, carCard, esc, drawSpark, junctionCard, pedCard, renderEvents, renderStats } from "./hud";
 
 const stage = new Stage($("world"));
 let world: THREE.Group | null = null;
@@ -26,7 +27,12 @@ let selected: { kind: "car" | "ped" | "junction"; id: number | string } | null =
 let follow = true;
 let hourSync = true;
 let manualHour = 12;
-const layers = { strips: true, conflicts: false, heat: false, mini: false };
+const layers = { strips: true, conflicts: false, heat: false, mini: false, hq: true };
+try {
+  if (localStorage.getItem("quality") === "low") layers.hq = false;
+} catch {
+  /* без хранилища — высокое качество */
+}
 
 // ---------------------------------------------------------------- сокет
 
@@ -65,10 +71,10 @@ function onHello(h: HelloMsg) {
   hello = h;
   const s = h.settings;
   const sel = $("worlds") as HTMLSelectElement;
-  sel.innerHTML = h.worlds.map((w) => `<option value="${w.id}">${w.title}</option>`).join("");
+  sel.innerHTML = h.worlds.map((w) => `<option value="${esc(w.id)}">${esc(w.title)}</option>`).join("");
   sel.value = s.world;
   $("speeds").innerHTML = h.speeds.map((v) => `<button data-speed="${v}">×${String(v).replace(".", ",")}</button>`).join("");
-  $("controllers").innerHTML = h.controllers.map((c) => `<button data-ctl="${c.id}" class="${c.id === s.controller ? "on" : ""}">${c.title}</button>`).join("");
+  $("controllers").innerHTML = h.controllers.map((c) => `<button data-ctl="${esc(c.id)}" class="${c.id === s.controller ? "on" : ""}">${esc(c.title)}</button>`).join("");
   const hints: Record<string, string> = {
     fixed: "Фазы идут по кругу с длительностью зелёного от состава фазы.",
     max_pressure: "Каждые 2 с выбирается фаза с наибольшим давлением: очередь на входе минус загрузка выхода.",
@@ -90,17 +96,28 @@ function setSlider(id: string, v: number, label: (v: number) => string) {
   $(`${id}-v`).textContent = label(v);
 }
 
+function disposeTree(root: THREE.Object3D) {
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    mesh.geometry?.dispose();
+    const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+    for (const mat of mats) {
+      for (const v of Object.values(mat)) if (v instanceof THREE.Texture) v.dispose();
+      mat.dispose();
+    }
+    (o as THREE.InstancedMesh).dispose?.();
+  });
+}
+
 function onNet(m: NetMsg) {
   net = m.net;
   if (world) {
     stage.scene.remove(world);
-    world.traverse((o) => {
-      const mesh = o as THREE.Mesh;
-      if (mesh.geometry) mesh.geometry.dispose();
-    });
+    disposeTree(world);
   }
   world = new THREE.Group();
   const roads = buildRoads(net.render, m.scenery.ground);
+  world.add(new Terrain(net.render.bbox, roads.rays).group);
   pick = roads.pick;
   world.add(roads.group);
   const city = new City(m.scenery);
@@ -138,7 +155,7 @@ function onFrame(f: FrameMsg) {
     events.push(...fresh);
     if (events.length > 400) events = events.slice(-400);
     overlays?.add(fresh, now, !f.full);
-    if (fresh.length) renderEvents(events.filter((e) => e.kind !== "stuck" || true), freshIds);
+    if (fresh.length) renderEvents(events, freshIds);
   }
   if (f.full) renderEvents(events, freshIds);
   if (f.series) drawSpark($("spark") as HTMLCanvasElement, f.series);
@@ -347,7 +364,7 @@ window.addEventListener("keydown", (e) => {
   }
   const views: Record<string, "3d" | "top" | "low"> = { Digit1: "3d", Digit2: "top", Digit3: "low" };
   if (views[e.code]) stage.view(views[e.code]);
-  const lk: Record<string, keyof typeof layers> = { KeyS: "strips", KeyC: "conflicts", KeyH: "heat", KeyM: "mini" };
+  const lk: Record<string, keyof typeof layers> = { KeyS: "strips", KeyC: "conflicts", KeyH: "heat", KeyM: "mini", KeyQ: "hq" };
   if (lk[e.code]) {
     layers[lk[e.code]] = !layers[lk[e.code]];
     applyLayers();
@@ -370,6 +387,14 @@ function applyLayers() {
     overlays.heat.visible = layers.heat;
   }
   stage.setMiniature(layers.mini);
+  if (stage.quality !== (layers.hq ? "high" : "low")) {
+    stage.setQuality(layers.hq ? "high" : "low");
+    try {
+      localStorage.setItem("quality", layers.hq ? "high" : "low");
+    } catch {
+      /* не запоминаем */
+    }
+  }
 }
 
 // ---------------------------------------------------------------- цикл отрисовки

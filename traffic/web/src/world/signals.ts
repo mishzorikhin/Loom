@@ -43,7 +43,7 @@ export class Signals {
     const boxMat = new THREE.MeshStandardMaterial({ color: "#16181c", roughness: 0.6 });
     this.offMat = new THREE.MeshStandardMaterial({ color: OFF, roughness: 0.3 });
     for (const [k, c] of Object.entries(COL)) {
-      this.onMat.set(k, new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 5, toneMapped: false }));
+      this.onMat.set(k, new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 9, toneMapped: false }));
     }
     const lampGeo = new THREE.CircleGeometry(0.13, 16);
     const glowPos: number[] = [];
