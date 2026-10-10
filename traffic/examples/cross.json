@@ -1,0 +1,87 @@
+{
+  "format": "loom-traffic/world",
+  "version": 1,
+  "name": "Перекрёсток магистрали и улицы",
+  "nodes": {
+    "a": {"pos": [0, 0], "kind": "signal"},
+    "n": {"pos": [0, 200], "kind": "boundary"},
+    "s": {"pos": [0, -200], "kind": "boundary"},
+    "e": {"pos": [200, 0], "kind": "boundary"},
+    "w": {"pos": [-200, 0], "kind": "boundary"}
+  },
+  "roads": {
+    "rn": {
+      "from": "a", "to": "n", "speed": 16.7,
+      "forward": [{"width": 3.5}, {"width": 3.5}],
+      "backward": [
+        {"width": 3.5, "turns": ["straight", "right"]},
+        {"width": 3.5, "turns": ["straight"]},
+        {"width": 3.25, "turns": ["left"], "length": 60}
+      ],
+      "median": {"width": 0.5},
+      "sidewalk": {"left": 3, "right": 3}
+    },
+    "rs": {
+      "from": "a", "to": "s", "speed": 16.7,
+      "forward": [{"width": 3.5}, {"width": 3.5}],
+      "backward": [
+        {"width": 3.5, "turns": ["straight", "right"]},
+        {"width": 3.5, "turns": ["straight"]},
+        {"width": 3.25, "turns": ["left"], "length": 60}
+      ],
+      "median": {"width": 0.5},
+      "sidewalk": {"left": 3, "right": 3}
+    },
+    "re": {
+      "from": "a", "to": "e", "speed": 11.1,
+      "forward": [{"width": 3.25}],
+      "backward": [{"width": 3.25, "turns": ["left", "straight", "right"]}],
+      "sidewalk": {"left": 2.5, "right": 2.5}
+    },
+    "rw": {
+      "from": "a", "to": "w", "speed": 11.1,
+      "forward": [{"width": 3.25}],
+      "backward": [{"width": 3.25, "turns": ["left", "straight", "right"]}],
+      "sidewalk": {"left": 2.5, "right": 2.5}
+    }
+  },
+  "junctions": {
+    "a": {
+      "crosswalks": "auto",
+      "connections": "auto",
+      "signal": {
+        "groups": {
+          "ns_main": {"movements": ["rn:straight", "rn:right", "rs:straight", "rs:right"]},
+          "ns_left": {"movements": ["rn:left", "rs:left"]},
+          "e_all": {"movements": ["re:left", "re:straight", "re:right"]},
+          "w_all": {"movements": ["rw:left", "rw:straight", "rw:right"]},
+          "ped_ew": {"crosswalks": ["re", "rw"]},
+          "ped_n": {"crosswalks": ["rn"]},
+          "ped_s": {"crosswalks": ["rs"]}
+        },
+        "phases": [
+          {"id": "p_ns", "green": ["ns_main", "ped_ew"]},
+          {"id": "p_ns_left", "green": ["ns_left"]},
+          {"id": "p_e", "green": ["e_all", "ped_n"]},
+          {"id": "p_w", "green": ["w_all", "ped_s"]}
+        ],
+        "bounds": {
+          "green": [5, 90],
+          "yellow": [0, 6],
+          "all_red": [0, 4],
+          "ped_flash": [0, 15]
+        }
+      }
+    }
+  },
+  "midblock_crosswalks": [
+    {
+      "id": "school",
+      "road": "rn",
+      "at": 120,
+      "width": 4,
+      "signal": "button",
+      "bounds": {"green": [5, 60], "yellow": [0, 6], "all_red": [0, 4], "ped_flash": [0, 15]}
+    }
+  ]
+}

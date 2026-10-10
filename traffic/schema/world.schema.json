@@ -1,0 +1,292 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "loom-traffic/world.schema.json",
+  "title": "Описание мира транспортной симуляции, версия 1",
+  "description": "Смысловое описание сети: узлы, дороги, полосы со стрелками, переходы, светофоры. Геометрию полос, коннекторы, конфликты и разметку выводит компилятор. Единицы: метры, секунды, м/с. Координаты: x на восток, y на север. Движение правостороннее. Правила, которые схема не выражает, описаны в docs/world-format.md.",
+  "type": "object",
+  "required": ["format", "version", "nodes", "roads"],
+  "additionalProperties": false,
+  "properties": {
+    "format": {"const": "loom-traffic/world"},
+    "version": {"const": 1},
+    "name": {"type": "string"},
+    "nodes": {
+      "type": "object",
+      "minProperties": 2,
+      "propertyNames": {"$ref": "#/$defs/id"},
+      "additionalProperties": {"$ref": "#/$defs/node"}
+    },
+    "roads": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/id"},
+      "additionalProperties": {"$ref": "#/$defs/road"}
+    },
+    "junctions": {
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/id"},
+      "additionalProperties": {"$ref": "#/$defs/junction"}
+    },
+    "midblock_crosswalks": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/midblock_crosswalk"}
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$"
+    },
+    "point": {
+      "type": "array",
+      "items": {"type": "number"},
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "range": {
+      "type": "array",
+      "items": {"type": "number", "minimum": 0},
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "movement": {
+      "enum": ["left", "straight", "right", "uturn"]
+    },
+    "node": {
+      "type": "object",
+      "required": ["pos", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "pos": {"$ref": "#/$defs/point"},
+        "kind": {
+          "description": "signal — перекрёсток со светофором, boundary — край сети (источник и сток машин и пешеходов).",
+          "enum": ["signal", "boundary"]
+        }
+      }
+    },
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "width": {"type": "number", "minimum": 2.5, "maximum": 5, "default": 3.5},
+        "turns": {
+          "description": "Стрелки: разрешённые движения в узле, куда ведёт полоса. Для полосы, ведущей в узел boundary, не задаются.",
+          "type": "array",
+          "items": {"$ref": "#/$defs/movement"},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "length": {
+          "description": "Карман: полоса существует только на последних length метрах перед стоп-линией. Без поля — на всю длину дороги.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "speed": {
+          "description": "Ограничение скорости полосы, м/с. Без поля — скорость дороги.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "road": {
+      "type": "object",
+      "required": ["from", "to", "forward", "backward"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {"$ref": "#/$defs/id"},
+        "to": {"$ref": "#/$defs/id"},
+        "shape": {
+          "description": "Промежуточные точки осевой линии между from и to. Пусто — прямая.",
+          "type": "array",
+          "items": {"$ref": "#/$defs/point"},
+          "default": []
+        },
+        "speed": {"type": "number", "exclusiveMinimum": 0, "default": 13.9},
+        "forward": {
+          "description": "Полосы в направлении from → to, от бордюра к центру.",
+          "type": "array",
+          "items": {"$ref": "#/$defs/lane"}
+        },
+        "backward": {
+          "description": "Полосы в направлении to → from, от бордюра к центру.",
+          "type": "array",
+          "items": {"$ref": "#/$defs/lane"}
+        },
+        "median": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "width": {"type": "number", "minimum": 0, "default": 0}
+          }
+        },
+        "sidewalk": {
+          "description": "Ширина тротуаров слева и справа по направлению from → to. 0 — тротуара нет.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "left": {"type": "number", "minimum": 0, "default": 3},
+            "right": {"type": "number", "minimum": 0, "default": 3}
+          }
+        },
+        "solid_before_stop": {
+          "description": "Длина сплошной линии между полосами перед стоп-линией, м. Дальше линия прерывистая.",
+          "type": "number",
+          "minimum": 0,
+          "default": 30
+        }
+      }
+    },
+    "crosswalk": {
+      "type": "object",
+      "required": ["arm"],
+      "additionalProperties": false,
+      "properties": {
+        "arm": {
+          "description": "Дорога-луч перекрёстка, через которую идёт переход.",
+          "$ref": "#/$defs/id"
+        },
+        "width": {"type": "number", "minimum": 2, "maximum": 8, "default": 4},
+        "offset": {
+          "description": "Отступ перехода от края перекрёстка, м.",
+          "type": "number",
+          "minimum": 0,
+          "default": 1
+        }
+      }
+    },
+    "lane_ref": {
+      "type": "object",
+      "required": ["road", "side", "lane"],
+      "additionalProperties": false,
+      "properties": {
+        "road": {"$ref": "#/$defs/id"},
+        "side": {"enum": ["forward", "backward"]},
+        "lane": {"type": "integer", "minimum": 0}
+      }
+    },
+    "connection": {
+      "type": "object",
+      "required": ["from", "to"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {"$ref": "#/$defs/lane_ref"},
+        "to": {"$ref": "#/$defs/lane_ref"}
+      }
+    },
+    "signal_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [
+        {"required": ["movements"]},
+        {"required": ["crosswalks"]}
+      ],
+      "properties": {
+        "movements": {
+          "description": "Движения машин в виде «дорога-подход:движение», например main_n:straight.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,31}:(left|straight|right|uturn)$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "crosswalks": {
+          "description": "Переходы по дороге-лучу, через которую они идут.",
+          "type": "array",
+          "items": {"$ref": "#/$defs/id"},
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "phase": {
+      "type": "object",
+      "required": ["id", "green"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "green": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/id"},
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "required": ["groups", "phases", "bounds"],
+      "additionalProperties": false,
+      "properties": {
+        "groups": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"$ref": "#/$defs/id"},
+          "additionalProperties": {"$ref": "#/$defs/signal_group"}
+        },
+        "phases": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/phase"},
+          "minItems": 2
+        },
+        "bounds": {
+          "description": "Пределы длительностей стадий, с. Внутри пределов длительность выбирает контроллер, в том числе опасно малую (вариант B).",
+          "type": "object",
+          "required": ["green", "yellow", "all_red", "ped_flash"],
+          "additionalProperties": false,
+          "properties": {
+            "green": {"$ref": "#/$defs/range"},
+            "yellow": {"$ref": "#/$defs/range"},
+            "all_red": {"$ref": "#/$defs/range"},
+            "ped_flash": {"$ref": "#/$defs/range"}
+          }
+        }
+      }
+    },
+    "junction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "crosswalks": {
+          "description": "auto — переход на каждом луче с тротуарами; none — переходов нет; список — только указанные.",
+          "oneOf": [
+            {"enum": ["auto", "none"]},
+            {"type": "array", "items": {"$ref": "#/$defs/crosswalk"}}
+          ],
+          "default": "auto"
+        },
+        "connections": {
+          "description": "auto — коннекторы по стрелкам и правилам компилятора; список — дополнительные или заменяющие явные соединения.",
+          "oneOf": [
+            {"const": "auto"},
+            {"type": "array", "items": {"$ref": "#/$defs/connection"}, "minItems": 1}
+          ],
+          "default": "auto"
+        },
+        "signal": {"$ref": "#/$defs/signal"}
+      }
+    },
+    "midblock_crosswalk": {
+      "type": "object",
+      "required": ["id", "road", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "road": {"$ref": "#/$defs/id"},
+        "at": {
+          "description": "Расстояние от узла from вдоль дороги, м.",
+          "type": "number",
+          "minimum": 0
+        },
+        "width": {"type": "number", "minimum": 2, "maximum": 8, "default": 4},
+        "signal": {
+          "description": "button — светофор по вызову пешехода (управляет контроллер), none — нерегулируемый (замысел, в версии 1 не поддерживается).",
+          "enum": ["button", "none"],
+          "default": "button"
+        },
+        "bounds": {"$ref": "#/$defs/signal/properties/bounds"}
+      }
+    }
+  }
+}
