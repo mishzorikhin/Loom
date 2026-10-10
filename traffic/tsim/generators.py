@@ -236,3 +236,21 @@ def district() -> dict:
         ("m3", "b_n3", "street", None), ("m3", "b_s3", "street", [s3]),
     ]
     return from_graph(nodes, edges, "Район с диагональным проспектом")
+
+
+def irregular() -> dict:
+    """Небольшой мир с разным числом фаз: звезда из пяти лучей (6 фаз) и Т-перекрёсток (3 фазы). Нужен проверкам раскладки среды."""
+    def at(p, deg, d):
+        a = math.radians(deg)
+        return [round(p[0] + d * math.cos(a), 1), round(p[1] + d * math.sin(a), 1)]
+
+    star, tee = [0.0, 0.0], [260.0, 0.0]
+    nodes = {"star": {"pos": star, "kind": "signal"}, "tee": {"pos": tee, "kind": "signal"}}
+    edges = [("star", "tee", "street", None)]
+    for i, deg in enumerate((72, 144, 216, 288)):
+        nodes[f"s{i}"] = {"pos": at(star, deg, 200), "kind": "boundary"}
+        edges.append(("star", f"s{i}", "street", None))
+    for i, deg in enumerate((60, -60)):
+        nodes[f"t{i}"] = {"pos": at(tee, deg, 200), "kind": "boundary"}
+        edges.append(("tee", f"t{i}", "street", None))
+    return from_graph(nodes, edges, "Звезда и Т-перекрёсток")

@@ -1,13 +1,59 @@
 """Контракт входа графовой модели: порядок, направления, маски и снимки."""
 
 import unittest
+import json
+from dataclasses import asdict
 
 import numpy as np
 
-from tsim.env import TrafficEnv
+from tsim.env import ObservationSpec, TrafficEnv
 
 
 class GraphEnvTest(unittest.TestCase):
+    def test_shared_layout_across_worlds(self):
+        worlds = ("cross", "grid2", "district", "irregular")
+        spec = ObservationSpec.from_worlds(worlds)
+        restored = ObservationSpec(**json.loads(json.dumps(asdict(spec))))
+        layouts = []
+        for world in worlds:
+            env = TrafficEnv(world, obs_spec=restored)
+            obs = env.reset()
+            graph = env.graph_observation()
+            layouts.append(env.obs_layout())
+            self.assertEqual(graph["x"].shape, (len(env.agents), len(layouts[0])))
+            self.assertEqual(graph["action_mask"].shape, (len(env.agents), spec.max_phases))
+            self.assertEqual(graph["lane_attr"].shape, (len(env.agents), spec.max_lanes, 6))
+            self.assertEqual(graph["phase_ped_mask"].shape, (len(env.agents), spec.max_phases, spec.max_ped))
+            np.testing.assert_array_equal(graph["phase_lane_mask"], graph["phase_movement_mask"].any(axis=-1))
+            self.assertTrue(np.all(graph["x"][~graph["feature_mask"]] == 0))
+            self.assertTrue(np.all(graph["lane_attr"][~graph["lane_mask"]] == 0))
+            for i, jid in enumerate(env.agents):
+                np.testing.assert_array_equal(graph["x"][i], obs[jid])
+                j = env.net.junctions[jid]
+                peds = [name for name, g in j.groups.items() if g.kind == "ped"]
+                for p, phase in enumerate(j.phases):
+                    for k, group_name in enumerate(peds):
+                        self.assertEqual(graph["phase_ped_mask"][i, p, k], group_name in phase["green"])
+                    # Включённые движения совпадают с коннекторами зелёных групп.
+                    expected = {(link.from_lane, link.movement)
+                                for group_name in phase["green"] if j.groups[group_name].kind == "car"
+                                for li in j.groups[group_name].links for link in [env.net.links[li]]}
+                    actual = {(j.approaches[k], graph["movement_names"][m])
+                              for k, m in zip(*np.nonzero(graph["phase_movement_mask"][i, p]))}
+                    self.assertEqual(actual, expected)
+            env.step({})
+        self.assertTrue(all(layout == layouts[0] for layout in layouts))
+
+    def test_too_small_layout_is_rejected(self):
+        for spec in (ObservationSpec(1, 10, 10), ObservationSpec(20, 1, 10), ObservationSpec(20, 10, 0)):
+            with self.assertRaisesRegex(ValueError, "миру нужно"):
+                TrafficEnv("grid2", obs_spec=spec)
+        for args in ((0, 1, 0), (1, 0, 0), (1, 1, -1), (1.5, 1, 0)):
+            with self.assertRaises(ValueError):
+                ObservationSpec(*args)
+        with self.assertRaises(ValueError):
+            ObservationSpec.from_worlds([])
+
     def test_road_features_and_direction(self):
         env = TrafficEnv("grid2")
         graph = env.graph()  # статический граф доступен до reset
@@ -65,7 +111,7 @@ class GraphEnvTest(unittest.TestCase):
         self.assertTrue(np.all(fresh["edge_attr"][:, :4] > 0))
 
     def test_padding_on_irregular_network(self):
-        env = TrafficEnv("perm")
+        env = TrafficEnv("irregular")
         env.reset()
         graph = env.graph_observation()
         self.assertEqual(graph["feature_mask"].shape, graph["x"].shape)

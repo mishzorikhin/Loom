@@ -33,6 +33,7 @@ LANE_FEATURES = 4      # очередь, машин в 100 м, средняя с
 STAGES = ("green", "change", "all_red")
 EDGE_FEATURES = ("distance/100", "length/100", "travel_time/10", "lanes/4", "direction.x", "direction.y")
 LANE_ATTRS = ("direction.x", "direction.y", "length/100", "speed/15", "width/4", "pocket/100")
+MOVEMENTS = ("right", "straight", "left", "uturn")
 
 
 @dataclass(frozen=True)
@@ -106,7 +107,7 @@ class TrafficEnv:
 
     @property
     def max_actions(self) -> int:
-        """Размер вектора маски: наибольшее число фаз среди перекрёстков."""
+        """Ёмкость выхода фаз и маски действий, заданная раскладкой obs_spec."""
         return self.max_phases
 
     def action_mask(self, jid: str) -> np.ndarray:
@@ -180,6 +181,7 @@ class TrafficEnv:
         feature_mask = np.zeros((n, self.obs_size), dtype=bool)
         lane_attr = np.zeros((n, self.max_lanes, len(LANE_ATTRS)), dtype=np.float32)
         phase_lane = np.zeros((n, self.max_phases, self.max_lanes), dtype=bool)
+        phase_movement = np.zeros((n, self.max_phases, self.max_lanes, len(MOVEMENTS)), dtype=bool)
         phase_ped = np.zeros((n, self.max_phases, self.max_ped), dtype=bool)
         phase_start = self.max_lanes * LANE_FEATURES
         stage_start = phase_start + self.max_phases
@@ -205,7 +207,10 @@ class TrafficEnv:
                         phase_ped[i, p, ped_slots[group_name]] = True
                     else:
                         for li in group.links:
-                            phase_lane[i, p, lane_slots[self.net.links[li].from_lane]] = True
+                            link = self.net.links[li]
+                            k = lane_slots[link.from_lane]
+                            phase_lane[i, p, k] = True
+                            phase_movement[i, p, k, MOVEMENTS.index(link.movement)] = True
         return {"nodes": graph["nodes"],
                 "x": np.stack([self._obs(jid) for jid in self.agents]),
                 "feature_mask": feature_mask,
@@ -215,6 +220,8 @@ class TrafficEnv:
                 "phase_mask": feature_mask[:, phase_start:stage_start].copy(),
                 "ped_mask": feature_mask[:, ped_start:].copy(),
                 "phase_lane_mask": phase_lane,
+                "phase_movement_mask": phase_movement,
+                "movement_names": list(MOVEMENTS),
                 "phase_ped_mask": phase_ped,
                 "edge_index": edge_index,
                 "edge_attr": np.asarray(graph["edge_features"], dtype=np.float32).reshape(-1, len(EDGE_FEATURES)),
