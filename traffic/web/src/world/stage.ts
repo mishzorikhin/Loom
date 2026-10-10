@@ -63,6 +63,8 @@ export class Stage {
   private radius = 200;
   private fly: { from: THREE.Vector3; to: THREE.Vector3; tFrom: THREE.Vector3; tTo: THREE.Vector3; t: number; dur: number } | null = null;
   miniature = false;
+  /** Свободная область экрана между колонками интерфейса: её центр — центр кадра. */
+  private area = { x: 0, y: 0, w: 0, h: 0 };
 
   constructor(readonly host: HTMLElement) {
     const r = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
@@ -155,10 +157,35 @@ export class Stage {
     this.renderer.setSize(w, h);
     this.composer.setSize(w, h);
     this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
+    this.applyArea();
     const pr = this.renderer.getPixelRatio();
     this.tiltH.uniforms.h.value = 1.6 / (w * pr);
     this.tiltV.uniforms.v.value = 1.6 / (h * pr);
+  }
+
+  setFocusArea(x: number, y: number, w: number, h: number) {
+    this.area = { x, y, w, h };
+    this.applyArea();
+  }
+
+  private applyArea() {
+    const W = this.host.clientWidth;
+    const H = this.host.clientHeight;
+    const a = this.area;
+    if (a.w > 0 && a.h > 0) {
+      // сдвиг главной точки проекции в центр свободной области; выбор мышью это учитывает сам
+      this.camera.setViewOffset(W, H, W / 2 - (a.x + a.w / 2), H / 2 - (a.y + a.h / 2), W, H);
+    } else this.camera.clearViewOffset();
+    this.camera.updateProjectionMatrix();
+  }
+
+  /** Во сколько раз отодвинуть камеру, чтобы сеть влезла в свободную область. */
+  private areaFit() {
+    const W = this.host.clientWidth;
+    const H = this.host.clientHeight;
+    const a = this.area;
+    if (!(a.w > 0 && a.h > 0)) return 1;
+    return Math.min(1.8, Math.max(1, Math.min(W / a.w, H / a.h) * 0.92));
   }
 
   setMiniature(on: boolean) {
@@ -184,7 +211,7 @@ export class Stage {
   }
 
   view(kind: "3d" | "top" | "low", animate = true) {
-    const d = this.radius * (kind === "low" ? 0.8 : 1.45);
+    const d = this.radius * (kind === "low" ? 0.8 : 1.45) * this.areaFit();
     let pos: THREE.Vector3;
     if (kind === "top") pos = this.center.clone().add(new THREE.Vector3(0, d * 1.05, 0.01));
     else if (kind === "low") pos = this.center.clone().add(new THREE.Vector3(d * 0.55, d * 0.32, d * 0.75));

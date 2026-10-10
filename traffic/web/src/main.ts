@@ -64,7 +64,9 @@ function toast(text: string) {
 function onHello(h: HelloMsg) {
   hello = h;
   const s = h.settings;
-  $("worlds").innerHTML = h.worlds.map((w) => `<button data-world="${w.id}" class="${w.id === s.world ? "on" : ""}">${w.title}</button>`).join("");
+  const sel = $("worlds") as HTMLSelectElement;
+  sel.innerHTML = h.worlds.map((w) => `<option value="${w.id}">${w.title}</option>`).join("");
+  sel.value = s.world;
   $("speeds").innerHTML = h.speeds.map((v) => `<button data-speed="${v}">×${String(v).replace(".", ",")}</button>`).join("");
   $("controllers").innerHTML = h.controllers.map((c) => `<button data-ctl="${c.id}" class="${c.id === s.controller ? "on" : ""}">${c.title}</button>`).join("");
   const hints: Record<string, string> = {
@@ -164,11 +166,15 @@ function queues() {
   return q;
 }
 
+function showTab(tab: "control" | "inspect") {
+  document.querySelectorAll<HTMLButtonElement>("#left-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
+  document.querySelectorAll<HTMLElement>("#left [data-pane]").forEach((p) => p.classList.toggle("hidden", p.dataset.pane !== tab));
+}
+
 function renderInspect() {
   if (!selected || !last || !net) return;
   const box = $("inspect");
-  if (box.classList.contains("hidden")) $("left").classList.add("collapsed");
-  box.classList.remove("hidden");
+  $("inspect-dot").classList.remove("hidden");
   // не перерисовывать, пока человек вводит длительности
   if (box.contains(document.activeElement) && document.activeElement?.tagName === "INPUT") return;
   if (selected.kind === "junction") {
@@ -179,9 +185,11 @@ function renderInspect() {
 }
 
 function closeInspect() {
+  const was = selected !== null;
   selected = null;
-  $("left").classList.remove("collapsed");
-  $("inspect").classList.add("hidden");
+  $("inspect").innerHTML = `<p class="muted empty">Щёлкните по перекрёстку, машине или пешеходу на карте.</p>`;
+  $("inspect-dot").classList.add("hidden");
+  if (was) showTab("control");
   overlays?.hideSelect();
 }
 
@@ -237,6 +245,8 @@ stage.renderer.domElement.addEventListener("pointerup", (e) => {
       const j = net!.junctions.find((x) => x.id === selected!.id)!;
       stage.focus(j.pos[0], j.pos[1], 95);
     }
+    showTab("inspect");
+    openRail("left");
     renderInspect();
   } else closeInspect();
 });
@@ -246,7 +256,7 @@ stage.renderer.domElement.addEventListener("pointerup", (e) => {
 document.addEventListener("click", (e) => {
   const t = (e.target as HTMLElement).closest("button") as HTMLButtonElement | null;
   if (!t) return;
-  if (t.dataset.world) send({ cmd: "load", world: t.dataset.world });
+  if (t.dataset.tab) showTab(t.dataset.tab as "control" | "inspect");
   if (t.dataset.speed) send({ cmd: "speed", value: Number(t.dataset.speed) });
   if (t.dataset.ctl) send({ cmd: "controller", value: t.dataset.ctl });
   if (t.dataset.view) stage.view(t.dataset.view as "3d" | "top" | "low");
@@ -265,8 +275,51 @@ for (const id of ["demand", "peds", "timing"]) {
   });
   $(id).addEventListener("change", (e) => send({ cmd: id, value: Number((e.target as HTMLInputElement).value) }));
 }
-$("left-head").addEventListener("click", () => $("left").classList.toggle("collapsed"));
-$("panels").addEventListener("click", () => document.body.classList.toggle("no-panels"));
+$("worlds").addEventListener("change", (e) => send({ cmd: "load", world: (e.target as HTMLSelectElement).value }));
+
+// колонки: на широком экране сворачиваются (и это запоминается), на узком — выдвижные шторки
+const narrow = window.matchMedia("(max-width: 860px)");
+function railShown(side: "left" | "right") {
+  return narrow.matches ? document.body.classList.contains(`open-${side}`) : !document.body.classList.contains(`no-${side}`);
+}
+function setRail(side: "left" | "right", show: boolean) {
+  if (narrow.matches) {
+    document.body.classList.toggle(`open-${side}`, show);
+    if (show) document.body.classList.remove(`open-${side === "left" ? "right" : "left"}`);
+  } else {
+    document.body.classList.toggle(`no-${side}`, !show);
+    try {
+      localStorage.setItem(`rail-${side}`, show ? "1" : "0");
+    } catch {
+      /* хранилище недоступно — не запоминаем */
+    }
+  }
+  $(`toggle-${side}`).classList.toggle("off", !railShown(side));
+  layoutChanged();
+}
+function openRail(side: "left" | "right") {
+  if (!railShown(side)) setRail(side, true);
+}
+for (const side of ["left", "right"] as const) {
+  try {
+    if (localStorage.getItem(`rail-${side}`) === "0") document.body.classList.add(`no-${side}`);
+  } catch {
+    /* без хранилища — колонки открыты */
+  }
+  $(`toggle-${side}`).addEventListener("click", () => setRail(side, !railShown(side)));
+  $(`toggle-${side}`).classList.toggle("off", !railShown(side));
+}
+narrow.addEventListener("change", () => {
+  document.body.classList.remove("open-left", "open-right");
+  layoutChanged();
+});
+
+/** Центр кадра — середина свободной области между колонками, а не всего окна. */
+function layoutChanged() {
+  const r = $("center").getBoundingClientRect();
+  stage.setFocusArea(r.left, r.top, r.width, r.height);
+}
+new ResizeObserver(layoutChanged).observe($("center"));
 $("block-box").addEventListener("change", (e) => send({ cmd: "block_box", value: (e.target as HTMLInputElement).checked }));
 $("reset").addEventListener("click", () => send({ cmd: "reset", seed: Number(($("seed") as HTMLInputElement).value) || 1 }));
 $("events").addEventListener("click", (e) => {
@@ -300,7 +353,13 @@ window.addEventListener("keydown", (e) => {
     applyLayers();
   }
   if (e.code === "Escape") closeInspect();
-  if (e.code === "KeyP") document.body.classList.toggle("no-panels");
+  if (e.code === "BracketLeft") setRail("left", !railShown("left"));
+  if (e.code === "BracketRight") setRail("right", !railShown("right"));
+  if (e.code === "KeyP") {
+    const show = !(railShown("left") || railShown("right"));
+    setRail("left", show);
+    setRail("right", show);
+  }
 });
 
 function applyLayers() {
