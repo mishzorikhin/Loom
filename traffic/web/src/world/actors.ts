@@ -40,6 +40,12 @@ interface KindMeshes {
   n: number;
 }
 
+interface Frame {
+  t: number;
+  cars: Map<number, Pose>;
+  peds: Map<number, Pose>;
+}
+
 interface Pose {
   x: number;
   y: number;
@@ -106,15 +112,18 @@ export class Actors {
   private pedHead: THREE.InstancedMesh;
   private links: Path[];
   private edges: Path[];
-  private prev = new Map<number, Pose>();
-  private cur = new Map<number, Pose>();
+  private next: number[][];
+  /** Буфер последних кадров: отрисовка идёт с задержкой между двумя известными кадрами. */
+  private frames: Frame[] = [];
   private rows = new Map<number, CarRow>();
-  private pedPrev = new Map<number, Pose>();
-  private pedCur = new Map<number, Pose>();
   private pedRows = new Map<number, PedRow>();
   private born = new Map<number, number>();
-  private tCur = 0;
+  /** Задняя ось машины: тянется за передней точкой, отсюда плавный поворот кузова. */
+  private rear = new Map<number, { x: number; y: number }>();
+  private pedHeading = new Map<number, number>();
+  private tLast = 0;
   private frameGap = 1 / 15;
+  private lastRender = 0;
   /** Положения в последнем кадре отрисовки: для выбора и слежения. */
   readonly carPos = new Map<number, { x: number; y: number; h: number }>();
   readonly pedPos = new Map<number, { x: number; y: number }>();
@@ -124,6 +133,7 @@ export class Actors {
 
   constructor(net: NetJ) {
     this.links = net.links.map((l) => new Path(l.pts));
+    this.next = net.links.map((l) => l.next ?? []);
     this.edges = net.sw_edges.map((e) => new Path(e.pts));
     const bodyMat = new THREE.MeshStandardMaterial({ color: "#ffffff", roughness: 0.32, metalness: 0.25 });
     const glassMat = new THREE.MeshStandardMaterial({ color: "#5b7389", roughness: 0.18, metalness: 0.05 });
@@ -219,40 +229,107 @@ export class Actors {
 
   /** Новый кадр сервера. */
   push(cars: CarRow[], peds: PedRow[], now: number) {
-    const gap = now - this.tCur;
-    if (this.tCur > 0) this.frameGap = this.frameGap * 0.8 + Math.min(Math.max(gap, 0.02), 0.5) * 0.2;
-    this.tCur = now;
-    [this.prev, this.cur] = [this.cur, this.prev];
-    this.cur.clear();
+    if (this.tLast > 0) {
+      const gap = Math.min(Math.max(now - this.tLast, 0.02), 0.5);
+      this.frameGap = this.frameGap * 0.85 + gap * 0.15;
+    }
+    this.tLast = now;
+    // метка кадра сглаживает неровный приход по сети
+    const prevT = this.frames.length ? this.frames[this.frames.length - 1].t : now - this.frameGap;
+    const t = Math.max(prevT + this.frameGap * 0.5, Math.min(now, prevT + this.frameGap * 1.5));
+    const f: Frame = { t, cars: new Map(), peds: new Map() };
     this.rows.clear();
     for (const r of cars) {
-      const id = r[0];
-      this.cur.set(id, this.carPose(r, {} as Pose));
-      this.rows.set(id, r);
-      if (!this.born.has(id)) this.born.set(id, now);
+      f.cars.set(r[0], this.carPose(r, {} as Pose));
+      this.rows.set(r[0], r);
+      if (!this.born.has(r[0])) this.born.set(r[0], now);
     }
-    [this.pedPrev, this.pedCur] = [this.pedCur, this.pedPrev];
-    this.pedCur.clear();
     this.pedRows.clear();
     for (const r of peds) {
-      this.pedCur.set(r[0], this.pedPose(r, {} as Pose));
+      f.peds.set(r[0], this.pedPose(r, {} as Pose));
       this.pedRows.set(r[0], r);
     }
+    this.frames.push(f);
+    if (this.frames.length > 5) this.frames.shift();
     if (this.born.size > 6000) {
-      for (const id of this.born.keys()) if (!this.cur.has(id)) this.born.delete(id);
+      for (const id of this.born.keys()) if (!f.cars.has(id)) this.born.delete(id);
     }
   }
 
+  /** Два кадра вокруг момента отрисовки и доля между ними. */
+  private bracket(rt: number): [Frame | undefined, Frame, number] {
+    const fr = this.frames;
+    const last = fr[fr.length - 1];
+    if (rt >= last.t || fr.length < 2) {
+      const a = fr[fr.length - 2];
+      return [a, last, 1];
+    }
+    for (let i = fr.length - 1; i > 0; i--) {
+      const a = fr[i - 1];
+      const b = fr[i];
+      if (rt >= a.t) return [a, b, Math.min(1, Math.max(0, (rt - a.t) / Math.max(b.t - a.t, 1e-3)))];
+    }
+    return [undefined, fr[0], 1];
+  }
+
+  /** Точка между двумя положениями машины вдоль её пути, в том числе через смену пути. */
+  private along(a: Pose, b: Pose, t: number, out: { x: number; y: number; h: number }) {
+    if (a.link === b.link) {
+      this.links[b.link].at(a.s + (b.s - a.s) * t, out);
+      return;
+    }
+    // цепочка путей от a к b (обычно полоса → коннектор → полоса)
+    const chain = this.chain(a.link, b.link);
+    if (chain) {
+      const lens = chain.map((li) => this.links[li].length);
+      let total = lens[0] - a.s + b.s;
+      for (let i = 1; i < chain.length - 1; i++) total += lens[i];
+      let d = Math.max(0, total) * t;
+      const first = lens[0] - a.s;
+      if (d <= first) {
+        this.links[chain[0]].at(a.s + d, out);
+        return;
+      }
+      d -= first;
+      for (let i = 1; i < chain.length - 1; i++) {
+        if (d <= lens[i]) {
+          this.links[chain[i]].at(d, out);
+          return;
+        }
+        d -= lens[i];
+      }
+      this.links[b.link].at(Math.min(d, b.s), out);
+      return;
+    }
+    // перестроение или неизвестный переход: по прямой
+    out.x = a.x + (b.x - a.x) * t;
+    out.y = a.y + (b.y - a.y) * t;
+    out.h = lerpAngle(a.h, b.h, t);
+  }
+
+  private chain(from: number, to: number): number[] | null {
+    for (const n1 of this.next[from]) {
+      if (n1 === to) return [from, to];
+      for (const n2 of this.next[n1]) {
+        if (n2 === to) return [from, n1, to];
+        for (const n3 of this.next[n2]) if (n3 === to) return [from, n1, n2, to];
+      }
+    }
+    return null;
+  }
+
   reset() {
-    this.prev.clear();
-    this.cur.clear();
-    this.pedPrev.clear();
-    this.pedCur.clear();
+    this.frames = [];
+    this.rear.clear();
+    this.pedHeading.clear();
     this.born.clear();
   }
 
   update(now: number, day: Daylight) {
-    const k = Math.min(1.25, Math.max(0, (now - this.tCur) / Math.max(this.frameGap, 1e-3)));
+    if (!this.frames.length) return;
+    const dtR = Math.min(0.1, Math.max(0, now - this.lastRender));
+    this.lastRender = now;
+    const [fa, fb, k] = this.bracket(now - this.frameGap * 1.6 - 0.02);
     const dummy = new THREE.Object3D();
     const col = new THREE.Color();
     const night = day.night;
@@ -266,32 +343,47 @@ export class Actors {
     let nb = 0;
     this.carPos.clear();
     const q = { x: 0, y: 0, h: 0 };
-    for (const [id, c] of this.cur) {
-      const r = this.rows.get(id)!;
-      const p = this.prev.get(id);
-      let x = c.x;
-      let y = c.y;
-      let h = c.h;
+    const seen = new Set<number>();
+    for (const [id, c] of fb.cars) {
+      const r = this.rows.get(id);
+      if (!r) continue;
+      seen.add(id);
+      const p = fa?.cars.get(id);
       let lat = c.lat;
       if (p) {
-        const t = Math.min(k, 1);
-        if (p.link === c.link) {
-          this.links[c.link].at(p.s + (c.s - p.s) * t, q);
-          x = q.x;
-          y = q.y;
-          h = q.h;
-        } else {
-          x = p.x + (c.x - p.x) * t;
-          y = p.y + (c.y - p.y) * t;
-          h = lerpAngle(p.h, c.h, t);
-        }
-        lat = p.lat + (c.lat - p.lat) * t;
+        this.along(p, c, k, q);
+        lat = p.lat + (c.lat - p.lat) * k;
+      } else {
+        q.x = c.x;
+        q.y = c.y;
+        q.h = c.h;
       }
+      const kind0 = Math.min(r[6], SPECS.length - 1);
+      const L = SPECS[kind0].L;
+      // передний край машины (сервер даёт s переднего края) со смещением перестроения
+      const fx = q.x - Math.sin(q.h) * lat;
+      const fy = q.y + Math.cos(q.h) * lat;
+      // задняя ось тянется за передней точкой на расстоянии колёсной базы
+      const wb = L * 0.62;
+      let rr = this.rear.get(id);
+      if (!rr || Math.hypot(fx - rr.x, fy - rr.y) > L * 3) {
+        rr = { x: fx - Math.cos(q.h) * wb, y: fy - Math.sin(q.h) * wb };
+        this.rear.set(id, rr);
+      } else {
+        const dx = fx - rr.x;
+        const dy = fy - rr.y;
+        const l = Math.hypot(dx, dy);
+        if (l > 1e-4) {
+          rr.x = fx - (dx / l) * wb;
+          rr.y = fy - (dy / l) * wb;
+        }
+      }
+      let h = Math.atan2(fy - rr.y, fx - rr.x);
       const flags = r[5];
       const crashed = (flags & FLAG.CRASH) !== 0;
       if (crashed) h += ((id * 0.37) % 0.6) - 0.3;
-      x += -Math.sin(h) * lat;
-      y += Math.cos(h) * lat;
+      const x = fx - Math.cos(h) * (L / 2);
+      const y = fy - Math.sin(h) * (L / 2);
       this.carPos.set(id, { x, y, h });
       const kind = Math.min(r[6], SPECS.length - 1);
       const kd = this.kinds[kind];
@@ -332,12 +424,14 @@ export class Actors {
       }
       if (night > 0.05 && nb < CAP) {
         const sp = SPECS[kind];
-        dummy.position.set(x + Math.cos(h) * sp.L * 0.45, 0.06, -(y + Math.sin(h) * sp.L * 0.45));
+        dummy.position.set(x + Math.cos(h) * sp.L * 0.48, 0.06, -(y + Math.sin(h) * sp.L * 0.48));
         dummy.scale.set(16, 1, 7);
         dummy.updateMatrix();
         this.beams.setMatrixAt(nb++, dummy.matrix);
       }
     }
+    if (this.rear.size > seen.size + 200) for (const id of this.rear.keys()) if (!seen.has(id)) this.rear.delete(id);
+    if (this.pedHeading.size > fb.peds.size + 200) for (const id of this.pedHeading.keys()) if (!fb.peds.has(id)) this.pedHeading.delete(id);
     this.kinds.forEach((kd, kind) => {
       for (const m of [kd.body, kd.glass, kd.head, kd.tail]) {
         m.count = kd.n;
@@ -356,18 +450,20 @@ export class Actors {
     let np = 0;
     this.pickPeds.ids.length = 0;
     this.pedPos.clear();
-    for (const [id, c] of this.pedCur) {
-      const r = this.pedRows.get(id)!;
-      const p = this.pedPrev.get(id);
+    for (const [id, c] of fb.peds) {
+      const r = this.pedRows.get(id);
+      if (!r) continue;
+      const p = fa?.peds.get(id);
       let x = c.x;
       let y = c.y;
-      let h = c.h;
-      if (p && p.link === c.link) {
-        const t = Math.min(k, 1);
-        x = p.x + (c.x - p.x) * t;
-        y = p.y + (c.y - p.y) * t;
-        h = lerpAngle(p.h, c.h, t);
+      if (p && Math.hypot(c.x - p.x, c.y - p.y) < 8) {
+        x = p.x + (c.x - p.x) * k;
+        y = p.y + (c.y - p.y) * k;
       }
+      // голова поворачивается плавно, а не рывком на углу тротуара
+      const prevH = this.pedHeading.get(id) ?? c.h;
+      const h = lerpAngle(prevH, c.h, 1 - Math.exp(-dtR * 8));
+      this.pedHeading.set(id, h);
       this.pedPos.set(id, { x, y });
       const state = r[4];
       const i = np++;

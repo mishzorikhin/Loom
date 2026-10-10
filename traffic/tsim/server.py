@@ -25,7 +25,7 @@ from .worlds import world as load_named
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "web" / "dist"
-FRAME_HZ = 15
+FRAME_HZ = 20
 SPEEDS = [0.5, 1, 2, 5, 10, 20, 40]
 
 def dumps(obj) -> str:

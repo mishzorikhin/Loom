@@ -353,4 +353,4 @@ tick();
 void hello;
 
 // для проверок скриншотами и отладки из консоли
-(window as unknown as { __tsim: unknown }).__tsim = { stage, send, layers, applyLayers };
+(window as unknown as { __tsim: unknown }).__tsim = { stage, send, layers, applyLayers, actors: () => actors };
